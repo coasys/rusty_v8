@@ -631,6 +631,25 @@ fn copy_archive(url: &str, filename: &Path) {
 
 fn print_link_flags() {
   println!("cargo:rustc-link-lib=static=rusty_v8");
+  println!("cargo:rustc-link-search=native=./target/release/gn_out");
+
+  // Link dynamic V8 libraries
+  println!("cargo:rustc-link-lib=dylib=v8");
+  println!("cargo:rustc-link-lib=dylib=v8_libplatform");
+  println!("cargo:rustc-link-lib=dylib=v8_libbase");
+  // Add other necessary libraries...
+
+  // Platform-specific linker arguments
+  if cfg!(target_os = "macos") {
+      // macOS specific rpath
+      println!("cargo:rustc-link-arg=-Wl,-rpath,@loader_path/../lib");
+  } else if cfg!(target_os = "linux") {
+      // Linux specific rpath
+      println!("cargo:rustc-link-arg=-Wl,-rpath,$ORIGIN/../lib");
+  } else if cfg!(target_os = "windows") {
+      // Windows uses a different mechanism; rpath is not used
+      // You might need to copy the DLLs next to the executable
+  }
   let should_dyn_link_libcxx = env::var("CARGO_FEATURE_USE_CUSTOM_LIBCXX")
     .is_err()
     || env::var("GN_ARGS").map_or(false, |gn_args| {
