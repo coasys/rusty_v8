@@ -81,4 +81,6 @@ default_args = {
 
   # Enable Deno-specific extra bindings
   deno_enable_extras = true
+
+  v8_monolithic = true
 }
