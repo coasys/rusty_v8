@@ -622,9 +622,17 @@ fn print_link_flags() {
   println!("cargo:rustc-link-search=native=./target/release/gn_out");
 
   // Link dynamic V8 libraries
-  println!("cargo:rustc-link-lib=dylib=v8");
+  
   println!("cargo:rustc-link-lib=dylib=v8_libplatform");
   println!("cargo:rustc-link-lib=dylib=v8_libbase");
+  println!("cargo:rustc-link-lib=dylib=v8");
+  println!("cargo:rustc-link-lib=dylib=c++_chrome");
+  println!("cargo:rustc-link-lib=dylib=third_party_icu_icui18n");
+  println!("cargo:rustc-link-lib=dylib=icuuc");
+  println!("cargo:rustc-link-lib=dylib=third_party_abseil-cpp_absl");
+  println!("cargo:rustc-link-lib=dylib=cppgc");
+  println!("cargo:rustc-link-lib=dylib=cppgc_base");
+  println!("cargo:rustc-link-lib=dylib=cppgc_shared");
   // Add other necessary libraries...
 
   // Platform-specific linker arguments

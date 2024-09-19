@@ -19,6 +19,15 @@ secondary_source = "//v8/"
 default_args = {
   clang_use_chrome_plugins = false
   is_component_build = true
+  v8_use_external_startup_data = false
+  v8_enable_symbol_visibility = true
+  symbol_level = 2
+  use_custom_libcxx = false
+  # trying to get cppgc build
+  v8_enable_oilpan=true
+  is_debug = false
+  
+
   linux_use_bundled_binutils = false
   use_dummy_lastchange = true
   use_sysroot = false
@@ -81,6 +90,4 @@ default_args = {
 
   # Enable Deno-specific extra bindings
   deno_enable_extras = true
-
-  v8_monolithic = true
 }
