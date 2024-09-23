@@ -168,7 +168,7 @@ fn build_v8(is_asan: bool) {
     gn_args.push("is_clang=false".into());
     // -gline-tables-only is Clang-only
     gn_args.push("line_tables_only=false".into());
-  } else if let Some(clang_base_path) = find_compatible_system_clang() {
+  } else if let Some(clang_base_path) = find_compatible_system_clang(target_os) {
     println!("clang_base_path (system): {}", clang_base_path.display());
     gn_args.push(format!("clang_base_path={:?}", clang_base_path));
     gn_args.push("treat_warnings_as_errors=false".to_string());
@@ -630,8 +630,6 @@ fn print_link_flags() {
   println!("cargo:rustc-link-lib=dylib=third_party_icu_icui18n");
   println!("cargo:rustc-link-lib=dylib=icuuc");
   println!("cargo:rustc-link-lib=dylib=third_party_abseil-cpp_absl");
-  
-  println!("cargo:rustc-dylib-link-arg=-D_LIBCPP_ABI_VERSION=1");
 
   // Add other necessary libraries...
 
@@ -728,16 +726,37 @@ fn is_compatible_clang_version(clang_path: &Path) -> bool {
   false
 }
 
-fn find_compatible_system_clang() -> Option<PathBuf> {
+fn find_compatible_system_clang(target_os: &str) -> Option<PathBuf> {
   if let Ok(p) = env::var("CLANG_BASE_PATH") {
     let base_path = Path::new(&p);
     let clang_path = base_path.join("bin").join("clang");
     if is_compatible_clang_version(&clang_path) {
       return Some(base_path.to_path_buf());
+    } else {
+      None
     }
+  } else if target_os == "macos" {
+    let clang_path = Path::new("/usr").join("bin").join("clang");
+    if is_compatible_clang_version(&clang_path) {
+      // Add use_lld=false to GN_ARGS environment variable
+      if let Ok(mut gn_args) = env::var("GN_ARGS") {
+        if !gn_args.contains("use_lld=false") {
+          if !gn_args.is_empty() {
+            gn_args.push(' ');
+          }
+          gn_args.push_str("use_lld=false");
+          env::set_var("GN_ARGS", gn_args);
+        }
+      } else {
+        env::set_var("GN_ARGS", "use_lld=false");
+      }
+      return Some(Path::new("/usr").to_path_buf());
+    } else {
+      None
+    }
+  } else {
+    None
   }
-
-  None
 }
 
 // Download chromium's clang into OUT_DIR because Cargo will not allow us to
