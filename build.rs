@@ -631,7 +631,7 @@ fn print_link_flags() {
   println!("cargo:rustc-link-lib=dylib=icuuc");
   println!("cargo:rustc-link-lib=dylib=third_party_abseil-cpp_absl");
   
-  println!("cargo:rustc-cdylib-link-arg=-D_LIBCPP_ABI_VERSION=1");
+  println!("cargo:rustc-dylib-link-arg=-D_LIBCPP_ABI_VERSION=1");
 
   // Add other necessary libraries...
 
