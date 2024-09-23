@@ -168,7 +168,7 @@ fn build_v8(is_asan: bool) {
     gn_args.push("is_clang=false".into());
     // -gline-tables-only is Clang-only
     gn_args.push("line_tables_only=false".into());
-  } else if let Some(clang_base_path) = find_compatible_system_clang(target_os) {
+  } else if let Some(clang_base_path) = find_compatible_system_clang(&target_os) {
     println!("clang_base_path (system): {}", clang_base_path.display());
     gn_args.push(format!("clang_base_path={:?}", clang_base_path));
     gn_args.push("treat_warnings_as_errors=false".to_string());
