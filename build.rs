@@ -726,6 +726,21 @@ fn is_compatible_clang_version(clang_path: &Path) -> bool {
   false
 }
 
+fn deactivate_lld() {
+  // Add use_lld=false to GN_ARGS environment variable
+  if let Ok(mut gn_args) = env::var("GN_ARGS") {
+    if !gn_args.contains("use_lld=false") {
+      if !gn_args.is_empty() {
+        gn_args.push(' ');
+      }
+      gn_args.push_str("use_lld=false");
+      env::set_var("GN_ARGS", gn_args);
+    }
+  } else {
+    env::set_var("GN_ARGS", "use_lld=false");
+  }
+}
+
 fn find_compatible_system_clang(target_os: &str) -> Option<PathBuf> {
   if let Ok(p) = env::var("CLANG_BASE_PATH") {
     let base_path = Path::new(&p);
@@ -738,19 +753,26 @@ fn find_compatible_system_clang(target_os: &str) -> Option<PathBuf> {
   } else if target_os == "macos" {
     let clang_path = Path::new("/usr").join("bin").join("clang");
     if is_compatible_clang_version(&clang_path) {
-      // Add use_lld=false to GN_ARGS environment variable
-      if let Ok(mut gn_args) = env::var("GN_ARGS") {
-        if !gn_args.contains("use_lld=false") {
-          if !gn_args.is_empty() {
-            gn_args.push(' ');
-          }
-          gn_args.push_str("use_lld=false");
-          env::set_var("GN_ARGS", gn_args);
-        }
-      } else {
-        env::set_var("GN_ARGS", "use_lld=false");
-      }
+      deactivate_lld();
       return Some(Path::new("/usr").to_path_buf());
+    } else {
+      None
+    }
+  } else if target_os == "windows" {
+    let llvm_path = Path::new("C:")
+      .join("Program Files (x86)")
+      .join("Microsoft Visual Studio")
+      .join("2022")
+      .join("BuildTools")
+      .join("VC")
+      .join("Tools")
+      .join("Llvm");
+    let clang_path = llvm_path.clone()
+      .join("bin")
+      .join("clang-cl");
+    if is_compatible_clang_version(&clang_path) {
+      deactivate_lld();
+      return Some(llvm_path);
     } else {
       None
     }
