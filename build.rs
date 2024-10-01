@@ -170,7 +170,8 @@ fn build_v8(is_asan: bool) {
     gn_args.push("line_tables_only=false".into());
   } else if let Some(clang_base_path) = find_compatible_system_clang(&target_os) {
     println!("clang_base_path (system): {}", clang_base_path.display());
-    gn_args.push(format!("clang_base_path={:?}", clang_base_path));
+    let clang_base_path_str = format!("'{}'", clang_base_path.display());
+    gn_args.push(format!("clang_base_path={}", clang_base_path_str));
     gn_args.push("treat_warnings_as_errors=false".to_string());
   } else {
     println!("using Chromium's clang");
@@ -715,7 +716,7 @@ fn need_gn_ninja_download() -> bool {
 // * unversioned (Linux) packages of clang (if recent enough)
 // but unfortunately it doesn't work with version-suffixed packages commonly
 // found in Linux packet managers
-fn is_compatible_clang_version(clang_path: &Path) -> bool {
+fn is_compatible_clang_version(clang_path: &str) -> bool {
   if let Ok(o) = Command::new(clang_path).arg("--version").output() {
     let _output = String::from_utf8(o.stdout).unwrap();
     // TODO check version output to make sure it's supported.
@@ -745,32 +746,36 @@ fn find_compatible_system_clang(target_os: &str) -> Option<PathBuf> {
   if let Ok(p) = env::var("CLANG_BASE_PATH") {
     let base_path = Path::new(&p);
     let clang_path = base_path.join("bin").join("clang");
-    if is_compatible_clang_version(&clang_path) {
+    if is_compatible_clang_version(&clang_path.display().to_string()) {
       return Some(base_path.to_path_buf());
     } else {
       None
     }
   } else if target_os == "macos" {
     let clang_path = Path::new("/usr").join("bin").join("clang");
-    if is_compatible_clang_version(&clang_path) {
+    if is_compatible_clang_version(&clang_path.display().to_string()) {
       deactivate_lld();
       return Some(Path::new("/usr").to_path_buf());
     } else {
       None
     }
   } else if target_os == "windows" {
-    let llvm_path = Path::new("C:")
-      .join("Program Files (x86)")
+    let llvm_path = Path::new("C:\\")
+      .join("\"Program Files (x86)\"")
       .join("Microsoft Visual Studio")
       .join("2022")
       .join("BuildTools")
       .join("VC")
       .join("Tools")
       .join("Llvm");
+
     let clang_path = llvm_path.clone()
       .join("bin")
-      .join("clang-cl");
-    if is_compatible_clang_version(&clang_path) {
+      .join("clang-cl.exe");
+
+    let clang_path_str = format!("\"{}\"", clang_path.display());
+
+    if is_compatible_clang_version(&clang_path_str) {
       deactivate_lld();
       return Some(llvm_path);
     } else {
