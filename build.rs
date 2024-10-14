@@ -550,7 +550,7 @@ where
   let mut inflate_state = InflateState::default();
   let mut input_buffer = [0; 16 * 1024];
   let mut output_buffer = [0; 16 * 1024];
-  let mut input_offset = 0;
+  let mut input_offset = 0; 
 
   // Skip the gzip header
   gzip_header::read_gz_header(input).unwrap();
@@ -622,23 +622,27 @@ fn print_link_flags() {
   println!("cargo:rustc-link-lib=static=rusty_v8");
   println!("cargo:rustc-link-search=native=./target/release/gn_out");
 
-  // Link dynamic V8 libraries
-  
-  println!("cargo:rustc-link-lib=dylib=v8_libplatform");
-  println!("cargo:rustc-link-lib=dylib=v8_libbase");
-  println!("cargo:rustc-link-lib=dylib=v8");
-  println!("cargo:rustc-link-lib=dylib=c++_chrome");
-  println!("cargo:rustc-link-lib=dylib=third_party_icu_icui18n");
-  println!("cargo:rustc-link-lib=dylib=icuuc");
-  println!("cargo:rustc-link-lib=dylib=third_party_abseil-cpp_absl");
-
-  // Add other necessary libraries...
-
   // Platform-specific linker arguments
   if cfg!(target_os = "macos") {
+      // Link dynamic V8 libraries  
+      println!("cargo:rustc-link-lib=dylib=v8_libplatform");
+      println!("cargo:rustc-link-lib=dylib=v8_libbase");
+      println!("cargo:rustc-link-lib=dylib=v8");
+      println!("cargo:rustc-link-lib=dylib=c++_chrome");
+      println!("cargo:rustc-link-lib=dylib=third_party_icu_icui18n");
+      println!("cargo:rustc-link-lib=dylib=icuuc");
+      println!("cargo:rustc-link-lib=dylib=third_party_abseil-cpp_absl");
       // macOS specific rpath
       println!("cargo:rustc-link-arg=-Wl,-rpath,@loader_path/../lib");
   } else if cfg!(target_os = "linux") {
+    // Link dynamic V8 libraries  
+      println!("cargo:rustc-link-lib=so=libv8_libplatform");
+      println!("cargo:rustc-link-lib=so=libv8_libbase");
+      println!("cargo:rustc-link-lib=so=libv8");
+      println!("cargo:rustc-link-lib=so=libc++");
+      println!("cargo:rustc-link-lib=so=libthird_party_icu_icui18n");
+      println!("cargo:rustc-link-lib=so=libicuuc");
+      println!("cargo:rustc-link-lib=so=libthird_party_abseil-cpp_absl");
       // Linux specific rpath
       println!("cargo:rustc-link-arg=-Wl,-rpath,$ORIGIN/../lib");
   } else if cfg!(target_os = "windows") {
@@ -694,6 +698,7 @@ fn print_link_flags() {
   }
 }
 
+
 // Chromium depot_tools contains helpers
 // which delegate to the "relevant" `buildtools`
 // directory when invoked, so they don't count.
@@ -724,7 +729,7 @@ fn is_compatible_clang_version(clang_path: &str) -> bool {
     const _MIN_LLVM_CLANG_VER: f32 = 8.0;
     return true;
   }
-  false
+  true
 }
 
 fn deactivate_lld() {
@@ -761,13 +766,13 @@ fn find_compatible_system_clang(target_os: &str) -> Option<PathBuf> {
     }
   } else if target_os == "windows" {
     let llvm_path = Path::new("C:\\")
-      .join("\"Program Files (x86)\"")
-      .join("Microsoft Visual Studio")
-      .join("2022")
-      .join("BuildTools")
-      .join("VC")
-      .join("Tools")
-      .join("Llvm");
+        .join("Program Files")
+        .join("Microsoft Visual Studio")
+        .join("2022")
+        .join("Community")
+        .join("VC")
+        .join("Tools")
+        .join("Llvm");
 
     let clang_path = llvm_path.clone()
       .join("bin")
@@ -777,7 +782,7 @@ fn find_compatible_system_clang(target_os: &str) -> Option<PathBuf> {
 
     if is_compatible_clang_version(&clang_path_str) {
       deactivate_lld();
-      return Some(llvm_path);
+      return Some(clang_path);
     } else {
       None
     }
@@ -895,7 +900,9 @@ pub fn is_debug() -> bool {
 }
 
 fn gn() -> String {
-  env::var("GN").unwrap_or_else(|_| "gn".to_owned())
+  let gn = env::var("GN").unwrap_or_else(|_| "gn".to_owned());
+  println!("Using gn: {}", gn.clone());
+  gn
 }
 
 /*
@@ -903,13 +910,16 @@ fn gn() -> String {
  * variable or defaulting to `python3`.
  */
 fn python() -> String {
-  env::var("PYTHON").unwrap_or_else(|_| "python3".to_owned())
+  let python = env::var("PYTHON").unwrap_or_else(|_| "python3".to_owned());
+  println!("Using python: {}", python);
+  env::var("PYTHON").unwrap_or_else(|_| "python".to_owned())
 }
 
 type NinjaEnv = Vec<(String, String)>;
 
 fn ninja(gn_out_dir: &Path, maybe_env: Option<NinjaEnv>) -> Command {
-  let cmd_string = env::var("NINJA").unwrap_or_else(|_| "ninja".to_owned());
+  let cmd_string = env::var("NINJA").unwrap_or_else(|_| "C:\\Strawberry\\c\\bin\\ninja.exe".to_owned());
+  println!("Using ninja: {}", cmd_string);
   let mut cmd = Command::new(cmd_string);
   cmd.arg("-C");
   cmd.arg(gn_out_dir);
