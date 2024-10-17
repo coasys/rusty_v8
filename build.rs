@@ -633,18 +633,18 @@ fn print_link_flags() {
       println!("cargo:rustc-link-lib=dylib=icuuc");
       println!("cargo:rustc-link-lib=dylib=third_party_abseil-cpp_absl");
       // macOS specific rpath
-      println!("cargo:rustc-link-arg=-Wl,-rpath,@loader_path/../lib");
+      // println!("cargo:rustc-link-arg=-Wl,-rpath,@loader_path/../lib");
   } else if cfg!(target_os = "linux") {
     // Link dynamic V8 libraries  
-      println!("cargo:rustc-link-lib=so=libv8_libplatform");
-      println!("cargo:rustc-link-lib=so=libv8_libbase");
-      println!("cargo:rustc-link-lib=so=libv8");
-      println!("cargo:rustc-link-lib=so=libc++");
-      println!("cargo:rustc-link-lib=so=libthird_party_icu_icui18n");
-      println!("cargo:rustc-link-lib=so=libicuuc");
-      println!("cargo:rustc-link-lib=so=libthird_party_abseil-cpp_absl");
-      // Linux specific rpath
-      println!("cargo:rustc-link-arg=-Wl,-rpath,$ORIGIN/../lib");
+      println!("cargo:rustc-link-lib=v8_libplatform");
+      println!("cargo:rustc-link-lib=v8_libbase");
+      println!("cargo:rustc-link-lib=v8");
+      println!("cargo:rustc-link-lib=c++");
+      println!("cargo:rustc-link-lib=third_party_icu_icui18n");
+      println!("cargo:rustc-link-lib=icuuc");
+      println!("cargo:rustc-link-lib=third_party_abseil-cpp_absl");
+
+      // println!("cargo:rustc-link-arg=-Wl,-rpath,$ORIGIN/../lib");
   } else if cfg!(target_os = "windows") {
       // Windows uses a different mechanism; rpath is not used
       // You might need to copy the DLLs next to the executable
