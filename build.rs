@@ -176,7 +176,7 @@ fn build_v8(is_asan: bool) {
     gn_args.push("line_tables_only=false".into());
   } else if let Some(clang_base_path) = find_compatible_system_clang(&target_os) {
     println!("clang_base_path (system): {}", clang_base_path.display());
-    let clang_base_path_str = format!("'{}'", clang_base_path.display());
+    let clang_base_path_str = format!("\"{}\"", clang_base_path.display());
     gn_args.push(format!("clang_base_path={}", clang_base_path_str));
     gn_args.push("treat_warnings_as_errors=false".to_string());
   } else {
@@ -907,7 +907,8 @@ fn gn() -> String {
 fn python() -> String {
   let python = env::var("PYTHON").unwrap_or_else(|_| "python3".to_owned());
   println!("Using python: {}", python);
-  env::var("PYTHON").unwrap_or_else(|_| "python".to_owned())
+  //env::var("PYTHON").unwrap_or_else(|_| "python".to_owned())
+  python
 }
 
 type NinjaEnv = Vec<(String, String)>;
@@ -934,7 +935,8 @@ pub type GnArgs = Vec<String>;
 
 pub fn maybe_gen(manifest_dir: &str, gn_args: GnArgs) -> PathBuf {
   let dirs = get_dirs(Some(manifest_dir));
-  let gn_out_dir = dirs.out.join("gn_out");
+  let target_arch = env::var("CARGO_CFG_TARGET_ARCH").unwrap();
+  let gn_out_dir = dirs.out.join("gn_out").join(target_arch);
 
   if !gn_out_dir.exists() || !gn_out_dir.join("build.ninja").exists() {
     let args = if let Ok(extra_args) = env::var("EXTRA_GN_ARGS") {
@@ -967,7 +969,11 @@ pub fn maybe_gen(manifest_dir: &str, gn_args: GnArgs) -> PathBuf {
 }
 
 pub fn build(target: &str, maybe_env: Option<NinjaEnv>) {
-  let gn_out_dir = get_dirs(None).out.join("gn_out");
+  let target_arch = env::var("CARGO_CFG_TARGET_ARCH").unwrap();
+  let gn_out_dir = get_dirs(None).out.join("gn_out").join(target_arch);
+  if !gn_out_dir.exists() {
+    fs::create_dir_all(&gn_out_dir).expect("Failed to create gn_out_dir");
+  }
 
   rerun_if_changed(&gn_out_dir, maybe_env.clone(), target);
 
