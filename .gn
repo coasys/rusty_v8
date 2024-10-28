@@ -24,7 +24,6 @@ default_args = {
   symbol_level = 2
   # trying to get cppgc build
   v8_enable_oilpan=true
-  is_debug = false
   
 
   linux_use_bundled_binutils = false
