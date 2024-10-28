@@ -625,8 +625,10 @@ fn copy_archive(url: &str, filename: &Path) {
 }
 
 fn print_link_flags() {
+  let target_arch = env::var("CARGO_CFG_TARGET_ARCH").unwrap();
+  
   println!("cargo:rustc-link-lib=static=rusty_v8");
-  println!("cargo:rustc-link-search=native=./target/release/gn_out");
+  println!("cargo:rustc-link-search=native=./target/release/gn_out/{}", target_arch);
 
   println!("cargo:rustc-link-lib=dylib=v8_libplatform");
   println!("cargo:rustc-link-lib=dylib=v8_libbase");
