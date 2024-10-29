@@ -159,12 +159,6 @@ fn build_v8(is_asan: bool) {
     gn_args.push("use_custom_libcxx=false".to_string());
   }
 
-  if cfg!(target_os = "macos") {
-    gn_args.push("use_custom_libcxx=true".to_string());
-  } else {
-    gn_args.push("use_custom_libcxx=false".to_string());
-  }
-
   // Fix GN's host_cpu detection when using x86_64 bins on Apple Silicon
   if cfg!(target_os = "macos") && cfg!(target_arch = "aarch64") {
     gn_args.push("host_cpu=\"arm64\"".to_string())
