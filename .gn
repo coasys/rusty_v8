@@ -18,9 +18,9 @@ secondary_source = "//v8/"
 
 default_args = {
   clang_use_chrome_plugins = false
-  is_component_build = true
   v8_use_external_startup_data = false
   v8_enable_symbol_visibility = true
+  default_symbol_visibility = "hidden"
   symbol_level = 2
   use_custom_libcxx = true
   # trying to get cppgc build

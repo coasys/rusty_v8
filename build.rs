@@ -164,6 +164,21 @@ fn build_v8(is_asan: bool) {
     gn_args.push("host_cpu=\"arm64\"".to_string())
   }
 
+  if cfg!(target_os = "linux") {  let repo_root = env::current_dir().unwrap();
+    let abseil_options_path = repo_root
+      .join("third_party")
+      .join("abseil-cpp")
+      .join("absl")
+      .join("base")
+      .join("options.h");
+  
+    modify_abseil_options(&abseil_options_path).expect("Failed to modify options.h");
+    gn_args.push(r#"extra_cflags = [ "-fvisibility=hidden", "-fvisibility-inlines-hidden" ]"#.to_string());
+    gn_args.push(r#"extra_ldflags = [ "-Wl,-Bsymbolic" ]"#.to_string());
+  } else {
+    gn_args.push(r#"is_component_build = true"#.to_string());
+  }
+
   if env::var_os("DISABLE_CLANG").is_some() {
     gn_args.push("is_clang=false".into());
     // -gline-tables-only is Clang-only
@@ -619,23 +634,23 @@ fn copy_archive(url: &str, filename: &Path) {
 }
 
 fn print_link_flags() {
-  let target_arch = env::var("CARGO_CFG_TARGET_ARCH").unwrap();
+  
   
   println!("cargo:rustc-link-lib=static=rusty_v8");
-  println!("cargo:rustc-link-search=native=./target/release/gn_out/{}", target_arch);
-
-  println!("cargo:rustc-link-lib=dylib=v8_libplatform");
-  println!("cargo:rustc-link-lib=dylib=v8_libbase");
-  println!("cargo:rustc-link-lib=dylib=v8");
-  println!("cargo:rustc-link-lib=dylib=third_party_icu_icui18n");
-  println!("cargo:rustc-link-lib=dylib=icuuc");
-  println!("cargo:rustc-link-lib=dylib=third_party_abseil-cpp_absl");
 
   // Platform-specific linker arguments
   if cfg!(target_os = "macos") {
-      println!("cargo:rustc-link-lib=dylib=c++_chrome");
+    let target_arch = env::var("CARGO_CFG_TARGET_ARCH").unwrap();
+    println!("cargo:rustc-link-search=native=./target/release/gn_out/{}", target_arch);
+    println!("cargo:rustc-link-lib=dylib=v8_libplatform");
+    println!("cargo:rustc-link-lib=dylib=v8_libbase");
+    println!("cargo:rustc-link-lib=dylib=v8");
+    println!("cargo:rustc-link-lib=dylib=third_party_icu_icui18n");
+    println!("cargo:rustc-link-lib=dylib=icuuc");
+    println!("cargo:rustc-link-lib=dylib=third_party_abseil-cpp_absl");
+    println!("cargo:rustc-link-lib=dylib=c++_chrome");
   } else if cfg!(target_os = "linux") {
-      println!("cargo:rustc-link-lib=dylib=c++");
+      //println!("cargo:rustc-link-lib=dylib=c++");
   } else if cfg!(target_os = "windows") {
       // Windows uses a different mechanism; rpath is not used
       // You might need to copy the DLLs next to the executable
@@ -1055,6 +1070,33 @@ pub fn parse_ninja_graph(s: &str) -> HashSet<String> {
     }
   }
   out
+}
+
+fn modify_abseil_options(options_path: &PathBuf) -> io::Result<()> {
+  // Read the contents of options.h
+  let mut options_content = fs::read_to_string(&options_path)?;
+
+  // Modify the necessary lines
+  // Replace the definitions of ABSL_OPTION_USE_INLINE_NAMESPACE and ABSL_OPTION_INLINE_NAMESPACE_NAME
+  options_content = options_content
+      .lines()
+      .map(|line| {
+          if line.contains("#define ABSL_OPTION_USE_INLINE_NAMESPACE") {
+              "#define ABSL_OPTION_USE_INLINE_NAMESPACE 1".to_string()
+          } else if line.contains("#define ABSL_OPTION_INLINE_NAMESPACE_NAME") {
+              "#define ABSL_OPTION_INLINE_NAMESPACE_NAME v8".to_string()
+          } else {
+              line.to_string()
+          }
+      })
+      .collect::<Vec<String>>()
+      .join("\n");
+
+  // Write the modified content back to options.h
+  let mut file = fs::File::create(&options_path)?;
+  file.write_all(options_content.as_bytes())?;
+
+  Ok(())
 }
 
 #[cfg(test)]
