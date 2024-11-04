@@ -164,20 +164,26 @@ fn build_v8(is_asan: bool) {
     gn_args.push("host_cpu=\"arm64\"".to_string())
   }
 
-  if cfg!(target_os = "linux") {  let repo_root = env::current_dir().unwrap();
+  if cfg!(target_os = "macos") {
+    gn_args.push(r#"is_component_build = true"#.to_string());
+  } else {
+    let repo_root = env::current_dir().unwrap();
     let abseil_options_path = repo_root
       .join("third_party")
       .join("abseil-cpp")
       .join("absl")
       .join("base")
       .join("options.h");
-  
+
     modify_abseil_options(&abseil_options_path).expect("Failed to modify options.h");
-    gn_args.push(r#"extra_cflags = [ "-fvisibility=hidden", "-fvisibility-inlines-hidden" ]"#.to_string());
-    gn_args.push(r#"extra_ldflags = [ "-Wl,-Bsymbolic" ]"#.to_string());
-  } else {
-    gn_args.push(r#"is_component_build = true"#.to_string());
+
+    if cfg!(target_os = "linux") {
+      gn_args.push(r#"extra_cflags = [ "-fvisibility=hidden", "-fvisibility-inlines-hidden" ]"#.to_string());
+      gn_args.push(r#"extra_ldflags = [ "-Wl,-Bsymbolic" ]"#.to_string());
+    }
   }
+
+  
 
   if env::var_os("DISABLE_CLANG").is_some() {
     gn_args.push("is_clang=false".into());
