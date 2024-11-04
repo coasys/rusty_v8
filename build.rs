@@ -777,15 +777,16 @@ fn find_compatible_system_clang(target_os: &str) -> Option<PathBuf> {
       None
     }
   } else if target_os == "windows" {
-    let llvm_path = Path::new("C:\\")
-        .join("Program Files")
+    let _llvm_path = Path::new("C:\\")
+        .join("Program Files (x86)")
         .join("Microsoft Visual Studio")
         .join("2022")
-        .join("Community")
+        .join("BuildTools")
         .join("VC")
         .join("Tools")
         .join("Llvm");
 
+    let llvm_path = Path::new("C:\\").join("LLVM");
     let clang_path = llvm_path.clone()
       .join("bin")
       .join("clang-cl.exe");
@@ -794,7 +795,7 @@ fn find_compatible_system_clang(target_os: &str) -> Option<PathBuf> {
 
     if is_compatible_clang_version(&clang_path_str) {
       deactivate_lld();
-      return Some(clang_path);
+      return Some(llvm_path);
     } else {
       None
     }
