@@ -164,27 +164,26 @@ fn build_v8(is_asan: bool) {
     gn_args.push("host_cpu=\"arm64\"".to_string())
   }
 
-  if cfg!(target_os = "macos") {
-    gn_args.push(r#"is_component_build = true"#.to_string());
-  } else {
-    gn_args.push(r#"default_symbol_visibility = "hidden""#.to_string());
-    let repo_root = env::current_dir().unwrap();
-    let abseil_options_path = repo_root
-      .join("third_party")
-      .join("abseil-cpp")
-      .join("absl")
-      .join("base")
-      .join("options.h");
+  gn_args.push(r#"default_symbol_visibility = "hidden""#.to_string());
+  let repo_root = env::current_dir().unwrap();
+  let abseil_options_path = repo_root
+    .join("third_party")
+    .join("abseil-cpp")
+    .join("absl")
+    .join("base")
+    .join("options.h");
 
-    modify_abseil_options(&abseil_options_path).expect("Failed to modify options.h");
+  modify_abseil_options(&abseil_options_path).expect("Failed to modify options.h");
 
-    if cfg!(target_os = "linux") {
-      gn_args.push(r#"extra_cflags = [ "-fvisibility=hidden", "-fvisibility-inlines-hidden" ]"#.to_string());
-      gn_args.push(r#"extra_ldflags = [ "-Wl,-Bsymbolic" ]"#.to_string());
-    }
+  if cfg!(target_os = "linux") {
+    gn_args.push(r#"extra_cflags = [ "-fvisibility=hidden", "-fvisibility-inlines-hidden" ]"#.to_string());
+    gn_args.push(r#"extra_ldflags = [ "-Wl,-Bsymbolic" ]"#.to_string());
   }
 
-  
+  if cfg!(target_os = "macos") {
+    gn_args.push(r#"extra_cflags = [ "-fvisibility=hidden", "-fvisibility-inlines-hidden" ]"#.to_string());
+    gn_args.push(r#"extra_ldflags = [ "-Wl,-x" ]"#.to_string());
+  }
 
   if env::var_os("DISABLE_CLANG").is_some() {
     gn_args.push("is_clang=false".into());
@@ -641,10 +640,9 @@ fn copy_archive(url: &str, filename: &Path) {
 }
 
 fn print_link_flags() {
-  
-  
   println!("cargo:rustc-link-lib=static=rusty_v8");
 
+  /*
   // Platform-specific linker arguments
   if cfg!(target_os = "macos") {
     let target_arch = env::var("CARGO_CFG_TARGET_ARCH").unwrap();
@@ -662,6 +660,7 @@ fn print_link_flags() {
       // Windows uses a different mechanism; rpath is not used
       // You might need to copy the DLLs next to the executable
   }
+   */
   let should_dyn_link_libcxx = env::var("CARGO_FEATURE_USE_CUSTOM_LIBCXX")
     .is_err()
     || env::var("GN_ARGS").map_or(false, |gn_args| {
