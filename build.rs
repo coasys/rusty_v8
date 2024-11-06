@@ -167,6 +167,7 @@ fn build_v8(is_asan: bool) {
   if cfg!(target_os = "macos") {
     gn_args.push(r#"is_component_build = true"#.to_string());
   } else {
+    gn_args.push(r#"default_symbol_visibility = "hidden""#.to_string());
     let repo_root = env::current_dir().unwrap();
     let abseil_options_path = repo_root
       .join("third_party")
