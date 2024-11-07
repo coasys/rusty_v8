@@ -1018,6 +1018,7 @@ pub fn build(target: &str, maybe_env: Option<NinjaEnv>) {
   }
 
   println!("cargo:rerun-if-env-changed=CARGO_CFG_TARGET_ARCH");
+  println!("cargo:rerun-if-env-changed=PROFILE");
   rerun_if_changed(&gn_out_dir, maybe_env.clone(), target);
 
   // This helps Rust source files locate the snapshot, source map etc.
