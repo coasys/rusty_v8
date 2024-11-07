@@ -159,35 +159,6 @@ fn build_v8(is_asan: bool) {
     gn_args.push("use_custom_libcxx=false".to_string());
   }
 
-  // Fix GN's host_cpu detection when using x86_64 bins on Apple Silicon
-  if cfg!(target_os = "macos") {
-    let host_arch = std::env::var("HOST_ARCH").unwrap_or_else(|_| {
-      // Detect the host architecture
-      match std::env::consts::ARCH {
-          "x86_64" => "x64".to_string(),
-          "aarch64" => "arm64".to_string(),
-          other => other.to_string(),
-      }
-    });
-  
-    let target_cpu = match target_arch.as_str() {
-        "x86_64" => "x64",
-        "aarch64" => "arm64",
-        _ => panic!("Unsupported architecture"),
-    };
-  
-    gn_args.push(format!("target_cpu=\"{}\"", target_cpu));
-    gn_args.push(format!("host_cpu=\"{}\"", host_arch));
-
-    if target_arch == "x86_64" {
-      gn_args.push(r#"extra_cflags = [ "-arch", "x86_64" ]"#.to_string());
-      gn_args.push(r#"extra_ldflags = [ "-arch", "x86_64" ]"#.to_string());
-    } else if target_arch == "aarch64" {
-      gn_args.push(r#"extra_cflags = [ "-arch", "arm64" ]"#.to_string());
-      gn_args.push(r#"extra_ldflags = [ "-arch", "arm64" ]"#.to_string());
-    }
-  }
-
   gn_args.push(r#"default_symbol_visibility = "hidden""#.to_string());
   let repo_root = env::current_dir().unwrap();
   let abseil_options_path = repo_root
@@ -207,6 +178,33 @@ fn build_v8(is_asan: bool) {
   if cfg!(target_os = "macos") {
     gn_args.push(r#"extra_cflags = [ "-fvisibility=hidden", "-fvisibility-inlines-hidden" ]"#.to_string());
     gn_args.push(r#"extra_ldflags = [ "-Wl,-x" ]"#.to_string());
+
+    // Fix GN's host_cpu detection when using x86_64 bins on Apple Silicon
+    let host_arch = std::env::var("HOST_ARCH").unwrap_or_else(|_| {
+      // Detect the host architecture
+      match std::env::consts::ARCH {
+          "x86_64" => "x64".to_string(),
+          "aarch64" => "arm64".to_string(),
+          other => other.to_string(),
+      }
+    });
+  
+    let target_cpu = match target_arch.as_str() {
+        "x86_64" => "x64",
+        "aarch64" => "arm64",
+        _ => panic!("Unsupported architecture"),
+    };
+  
+    gn_args.push(format!("target_cpu=\"{}\"", target_cpu));
+    gn_args.push(format!("host_cpu=\"{}\"", host_arch));
+
+    if target_arch == "x86_64" {
+      gn_args.push(r#"extra_cflags += [ "-arch", "x86_64" ]"#.to_string());
+      gn_args.push(r#"extra_ldflags += [ "-arch", "x86_64" ]"#.to_string());
+    } else if target_arch == "aarch64" {
+      gn_args.push(r#"extra_cflags += [ "-arch", "arm64" ]"#.to_string());
+      gn_args.push(r#"extra_ldflags += [ "-arch", "arm64" ]"#.to_string());
+    }
   }
 
   if env::var_os("DISABLE_CLANG").is_some() {
