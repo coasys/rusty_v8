@@ -92,7 +92,8 @@ fn main() {
   };
 
   // Build from source
-  if env::var_os("V8_FROM_SOURCE").is_some() {
+  //if env::var_os("V8_FROM_SOURCE").is_some() {
+  if true {
     if is_asan && std::env::var_os("OPT_LEVEL").unwrap_or_default() == "0" {
       panic!("v8 crate cannot be compiled with OPT_LEVEL=0 and ASAN.\nTry `[profile.dev.package.v8] opt-level = 1`.\nAborting before miscompilations cause issues.");
     }
@@ -157,6 +158,27 @@ fn build_v8(is_asan: bool) {
     gn_args.push("use_custom_libcxx=false".to_string());
   }
 
+  gn_args.push(r#"default_symbol_visibility = "hidden""#.to_string());
+  let repo_root = env::current_dir().unwrap();
+  let abseil_options_path = repo_root
+    .join("third_party")
+    .join("abseil-cpp")
+    .join("absl")
+    .join("base")
+    .join("options.h");
+
+  modify_abseil_options(&abseil_options_path).expect("Failed to modify options.h");
+
+  if cfg!(target_os = "linux") {
+    gn_args.push(r#"extra_cflags = [ "-fvisibility=hidden", "-fvisibility-inlines-hidden" ]"#.to_string());
+    gn_args.push(r#"extra_ldflags = [ "-Wl,-Bsymbolic" ]"#.to_string());
+  }
+
+  if cfg!(target_os = "macos") {
+    gn_args.push(r#"extra_cflags = [ "-fvisibility=hidden", "-fvisibility-inlines-hidden" ]"#.to_string());
+    gn_args.push(r#"extra_ldflags = [ "-Wl,-x" ]"#.to_string());
+  }
+  
   // Fix GN's host_cpu detection when using x86_64 bins on Apple Silicon
   if cfg!(target_os = "macos") && cfg!(target_arch = "aarch64") {
     gn_args.push("host_cpu=\"arm64\"".to_string())
@@ -974,6 +996,34 @@ pub fn parse_ninja_graph(s: &str) -> HashSet<String> {
   }
   out
 }
+
+fn modify_abseil_options(options_path: &PathBuf) -> io::Result<()> {
+  // Read the contents of options.h
+  let mut options_content = fs::read_to_string(&options_path)?;
+
+  // Modify the necessary lines
+  // Replace the definitions of ABSL_OPTION_USE_INLINE_NAMESPACE and ABSL_OPTION_INLINE_NAMESPACE_NAME
+  options_content = options_content
+      .lines()
+      .map(|line| {
+          if line.contains("#define ABSL_OPTION_USE_INLINE_NAMESPACE") {
+              "#define ABSL_OPTION_USE_INLINE_NAMESPACE 1".to_string()
+          } else if line.contains("#define ABSL_OPTION_INLINE_NAMESPACE_NAME") {
+              "#define ABSL_OPTION_INLINE_NAMESPACE_NAME v8".to_string()
+          } else {
+              line.to_string()
+          }
+      })
+      .collect::<Vec<String>>()
+      .join("\n");
+
+  // Write the modified content back to options.h
+  let mut file = fs::File::create(&options_path)?;
+  file.write_all(options_content.as_bytes())?;
+
+  Ok(())
+}
+
 
 #[cfg(test)]
 mod test {
