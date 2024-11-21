@@ -92,8 +92,8 @@ fn main() {
   };
 
   // Build from source
-  //if env::var_os("V8_FROM_SOURCE").is_some() {
-  if true {
+  env::set_var("V8_FROM_SOURCE", "1");
+  if env::var_os("V8_FROM_SOURCE").is_some() {
     if is_asan && std::env::var_os("OPT_LEVEL").unwrap_or_default() == "0" {
       panic!("v8 crate cannot be compiled with OPT_LEVEL=0 and ASAN.\nTry `[profile.dev.package.v8] opt-level = 1`.\nAborting before miscompilations cause issues.");
     }
@@ -178,7 +178,7 @@ fn build_v8(is_asan: bool) {
     gn_args.push(r#"extra_cflags = [ "-fvisibility=hidden", "-fvisibility-inlines-hidden" ]"#.to_string());
     gn_args.push(r#"extra_ldflags = [ "-Wl,-x" ]"#.to_string());
   }
-  
+
   // Fix GN's host_cpu detection when using x86_64 bins on Apple Silicon
   if cfg!(target_os = "macos") && cfg!(target_arch = "aarch64") {
     gn_args.push("host_cpu=\"arm64\"".to_string())
