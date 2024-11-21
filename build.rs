@@ -998,30 +998,31 @@ pub fn parse_ninja_graph(s: &str) -> HashSet<String> {
 }
 
 fn modify_abseil_options(options_path: &PathBuf) -> io::Result<()> {
-  // Read the contents of options.h
-  let mut options_content = fs::read_to_string(&options_path)?;
+    // Read the contents of options.h
+    let current_content = fs::read_to_string(&options_path)?;
+    
+    // Create the expected content
+    let new_content = current_content
+        .lines()
+        .map(|line| {
+            if line.contains("#define ABSL_OPTION_USE_INLINE_NAMESPACE") {
+                "#define ABSL_OPTION_USE_INLINE_NAMESPACE 1".to_string()
+            } else if line.contains("#define ABSL_OPTION_INLINE_NAMESPACE_NAME") {
+                "#define ABSL_OPTION_INLINE_NAMESPACE_NAME v8".to_string()
+            } else {
+                line.to_string()
+            }
+        })
+        .collect::<Vec<String>>()
+        .join("\n");
+    
+    // Only write if content actually changed
+    if current_content != new_content {
+        let mut file = fs::File::create(&options_path)?;
+        file.write_all(new_content.as_bytes())?;
+    }
 
-  // Modify the necessary lines
-  // Replace the definitions of ABSL_OPTION_USE_INLINE_NAMESPACE and ABSL_OPTION_INLINE_NAMESPACE_NAME
-  options_content = options_content
-      .lines()
-      .map(|line| {
-          if line.contains("#define ABSL_OPTION_USE_INLINE_NAMESPACE") {
-              "#define ABSL_OPTION_USE_INLINE_NAMESPACE 1".to_string()
-          } else if line.contains("#define ABSL_OPTION_INLINE_NAMESPACE_NAME") {
-              "#define ABSL_OPTION_INLINE_NAMESPACE_NAME v8".to_string()
-          } else {
-              line.to_string()
-          }
-      })
-      .collect::<Vec<String>>()
-      .join("\n");
-
-  // Write the modified content back to options.h
-  let mut file = fs::File::create(&options_path)?;
-  file.write_all(options_content.as_bytes())?;
-
-  Ok(())
+    Ok(())
 }
 
 
