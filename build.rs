@@ -161,6 +161,8 @@ fn build_v8(is_asan: bool) {
     gn_args.push("use_custom_libcxx=false".to_string());
   }
 
+  gn_args.push(r#"extra_cflags = [ "-D_LIBCPP_DISABLE_ASSERTS" ]"#.to_string());
+
   gn_args.push(r#"default_symbol_visibility = "hidden""#.to_string());
   let repo_root = env::current_dir().unwrap();
   let abseil_options_path = repo_root
@@ -193,10 +195,10 @@ fn build_v8(is_asan: bool) {
     gn_args.push(format!("host_cpu=\"{}\"", host_arch));
 
     if target_arch == "x86_64" {
-      gn_args.push(r#"extra_cflags = [ "-arch", "x86_64" ]"#.to_string());
+      gn_args.push(r#"extra_cflags += [ "-arch", "x86_64" ]"#.to_string());
       gn_args.push(r#"extra_ldflags = [ "-arch", "x86_64" ]"#.to_string());
     } else if target_arch == "aarch64" {
-      gn_args.push(r#"extra_cflags = [ "-arch", "arm64" ]"#.to_string());
+      gn_args.push(r#"extra_cflags += [ "-arch", "arm64" ]"#.to_string());
       gn_args.push(r#"extra_ldflags = [ "-arch", "arm64" ]"#.to_string());
     }
   }
