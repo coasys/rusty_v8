@@ -152,8 +152,6 @@ fn build_v8(is_asan: bool) {
   } else {
     vec!["is_debug=false".to_string()]
   };
-  let symbol_level = if is_debug() { "2" } else { "1" };
-  gn_args.push(format!("symbol_level={}", symbol_level));
   if is_asan {
     gn_args.push("is_asan=true".to_string());
   }
