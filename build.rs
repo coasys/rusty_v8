@@ -170,15 +170,7 @@ fn build_v8(is_asan: bool) {
 
   modify_abseil_options(&abseil_options_path).expect("Failed to modify options.h");
 
-  if cfg!(target_os = "linux") {
-    gn_args.push(r#"extra_cflags = [ "-fvisibility=hidden", "-fvisibility-inlines-hidden" ]"#.to_string());
-    gn_args.push(r#"extra_ldflags = [ "-Wl,-Bsymbolic" ]"#.to_string());
-  }
-
   if cfg!(target_os = "macos") {
-    gn_args.push(r#"extra_cflags = [ "-fvisibility=hidden", "-fvisibility-inlines-hidden" ]"#.to_string());
-    gn_args.push(r#"extra_ldflags = [ "-Wl,-x" ]"#.to_string());
-
     // Fix GN's host_cpu detection when using x86_64 bins on Apple Silicon
     let host_arch = std::env::var("HOST_ARCH").unwrap_or_else(|_| {
       // Detect the host architecture
