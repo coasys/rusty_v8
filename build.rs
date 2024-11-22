@@ -191,11 +191,11 @@ fn build_v8(is_asan: bool) {
     gn_args.push(format!("host_cpu=\"{}\"", host_arch));
 
     if target_arch == "x86_64" {
-      gn_args.push(r#"extra_cflags += [ "-arch", "x86_64" ]"#.to_string());
-      gn_args.push(r#"extra_ldflags += [ "-arch", "x86_64" ]"#.to_string());
+      gn_args.push(r#"extra_cflags = [ "-arch", "x86_64" ]"#.to_string());
+      gn_args.push(r#"extra_ldflags = [ "-arch", "x86_64" ]"#.to_string());
     } else if target_arch == "aarch64" {
-      gn_args.push(r#"extra_cflags += [ "-arch", "arm64" ]"#.to_string());
-      gn_args.push(r#"extra_ldflags += [ "-arch", "arm64" ]"#.to_string());
+      gn_args.push(r#"extra_cflags = [ "-arch", "arm64" ]"#.to_string());
+      gn_args.push(r#"extra_ldflags = [ "-arch", "arm64" ]"#.to_string());
     }
   }
 
