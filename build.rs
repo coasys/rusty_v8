@@ -182,6 +182,10 @@ fn build_v8(is_asan: bool) {
           other => other.to_string(),
       }
     });
+
+    if host_arch == "x64" {
+      patch_v8_files();
+    }
   
     let target_cpu = match target_arch.as_str() {
         "x86_64" => "x64",
@@ -1123,6 +1127,34 @@ fn modify_abseil_options(options_path: &PathBuf) -> io::Result<()> {
     }
 
     Ok(())
+}
+
+
+fn patch_v8_files() {
+  // List all files that need patching.
+  let files_to_patch = [
+      "v8/src/compiler/turboshaft/wasm-revec-reducer.h",
+      "v8/src/compiler/turboshaft/wasm-revec-phase.cc",
+  ];
+
+  for file in &files_to_patch {
+      if Path::new(file).exists() {
+          println!("Patching {}", file);
+          let status = Command::new("sed")
+              .args(&[
+                  "-i.bak",
+                  "s/\\.TryCast</.template TryCast</g",
+                  file,
+              ])
+              .status()
+              .expect("Failed to run sed for patching V8 source");
+          if !status.success() {
+              panic!("sed patch failed for {}", file);
+          }
+      } else {
+          println!("File {} not found; skipping patch", file);
+      }
+  }
 }
 
 #[cfg(test)]
