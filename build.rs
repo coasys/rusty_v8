@@ -890,12 +890,13 @@ fn maybe_symlink_root_dir(dirs: &mut Dirs) {
   use std::os::windows::fs::symlink_dir;
 
   let get_prefix = |p: &Path| {
-    p.components()
+    let prefix = p.components()
       .find_map(|c| match c {
         std::path::Component::Prefix(p) => Some(p),
         _ => None,
       })
-      .map(|p| p.as_os_str().to_owned())
+      .map(|p| p.as_os_str().to_string_lossy().to_lowercase());
+    prefix
   };
 
   let Dirs { out, root } = dirs;
