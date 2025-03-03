@@ -172,6 +172,10 @@ fn build_v8(is_asan: bool) {
 
   modify_abseil_options(&abseil_options_path).expect("Failed to modify options.h");
 
+  if cfg!(target_os = "windows" ) {
+    patch_inspector_protocol();
+  }
+
   if cfg!(target_os = "macos") {
     // Fix GN's host_cpu detection when using x86_64 bins on Apple Silicon
     let host_arch = std::env::var("HOST_ARCH").unwrap_or_else(|_| {
@@ -1155,6 +1159,31 @@ fn patch_v8_files() {
       } else {
           println!("File {} not found; skipping patch", file);
       }
+  }
+}
+
+fn patch_inspector_protocol() {
+  let v8_root = PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap()).join("v8");
+  let gni_path = v8_root.join("third_party/inspector_protocol/inspector_protocol.gni");
+  
+  // Read the original content
+  let mut content = fs::read_to_string(&gni_path)
+      .expect("Failed to read inspector_protocol.gni");
+  
+  // Patch the outputs_pre line
+  let old_line = "outputs_pre = get_path_info(rebase_path(invoker.outputs, \".\", invoker.out_dir), \"abspath\")";
+  let new_lines = r#"outputs_pre = get_path_info(rebase_path(invoker.outputs, ".", invoker.out_dir), "abspath")
+  outputs = []
+  foreach(out, outputs_pre) {
+    outputs += [ string_replace(out, "/C:/", "C:/") ]
+  }"#;
+  if content.contains(old_line) {
+      content = content.replace(old_line, new_lines);
+      fs::write(&gni_path, content)
+          .expect("Failed to write patched inspector_protocol.gni");
+      println!("Patched inspector_protocol.gni to fix /C:/ paths");
+  } else {
+      println!("Warning: Could not find outputs_pre line to patch in inspector_protocol.gni");
   }
 }
 
