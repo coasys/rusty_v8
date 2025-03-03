@@ -1171,7 +1171,7 @@ fn patch_inspector_protocol() {
       .expect("Failed to read inspector_protocol.gni");
   
   // Patch the outputs_pre line
-  let old_line = "outputs_pre = get_path_info(rebase_path(invoker.outputs, \".\", invoker.out_dir), \"abspath\")";
+  let old_line = "outputs = get_path_info(rebase_path(invoker.outputs, \".\", invoker.out_dir),\n                            \"abspath\")";
   let new_lines = r#"outputs_pre = get_path_info(rebase_path(invoker.outputs, ".", invoker.out_dir), "abspath")
   outputs = []
   foreach(out, outputs_pre) {
