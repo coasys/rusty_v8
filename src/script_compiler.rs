@@ -1,17 +1,17 @@
 // Copyright 2019-2021 the Deno authors. All rights reserved. MIT license.
 use std::{marker::PhantomData, mem::MaybeUninit};
 
-use crate::support::int;
 use crate::Function;
 use crate::Local;
 use crate::Module;
 use crate::Object;
 use crate::ScriptOrigin;
 use crate::String;
+use crate::support::int;
 use crate::{Context, Isolate, Script, UnboundScript};
 use crate::{HandleScope, UniqueRef};
 
-extern "C" {
+unsafe extern "C" {
   fn v8__ScriptCompiler__Source__CONSTRUCT(
     buf: *mut MaybeUninit<Source>,
     source_string: *const String,
@@ -91,7 +91,7 @@ pub struct CachedData<'a> {
   _phantom: PhantomData<&'a ()>,
 }
 
-impl<'a> Drop for CachedData<'a> {
+impl Drop for CachedData<'_> {
   fn drop(&mut self) {
     unsafe {
       v8__ScriptCompiler__CachedData__DELETE(self);
@@ -125,7 +125,7 @@ impl<'a> CachedData<'a> {
   }
 }
 
-impl<'a> std::ops::Deref for CachedData<'a> {
+impl std::ops::Deref for CachedData<'_> {
   type Target = [u8];
   fn deref(&self) -> &Self::Target {
     unsafe { std::slice::from_raw_parts(self.data, self.length as usize) }
@@ -151,7 +151,7 @@ impl Source {
       v8__ScriptCompiler__Source__CONSTRUCT(
         &mut buf,
         &*source_string,
-        origin.map(|x| x as *const _).unwrap_or(std::ptr::null()),
+        origin.map_or(std::ptr::null(), |x| x as *const _),
         std::ptr::null_mut(),
       );
       buf.assume_init()
@@ -169,7 +169,7 @@ impl Source {
       v8__ScriptCompiler__Source__CONSTRUCT(
         &mut buf,
         &*source_string,
-        origin.map(|x| x as *const _).unwrap_or(std::ptr::null()),
+        origin.map_or(std::ptr::null(), |x| x as *const _),
         cached_data.into_raw(), // Source constructor takes ownership.
       );
       buf.assume_init()
@@ -196,7 +196,7 @@ impl Drop for Source {
 }
 
 #[repr(C)]
-#[derive(Debug)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub enum CompileOptions {
   NoCompileOptions = 0,
   ConsumeCodeCache,
@@ -232,11 +232,11 @@ pub enum NoCacheReason {
 #[inline(always)]
 pub fn compile_module<'s>(
   scope: &mut HandleScope<'s>,
-  mut source: Source,
+  source: &mut Source,
 ) -> Option<Local<'s, Module>> {
   compile_module2(
     scope,
-    &mut source,
+    source,
     CompileOptions::NoCompileOptions,
     NoCacheReason::NoReason,
   )
@@ -284,7 +284,7 @@ pub fn compile<'s>(
 #[inline(always)]
 pub fn compile_function<'s>(
   scope: &mut HandleScope<'s>,
-  mut source: Source,
+  source: &mut Source,
   arguments: &[Local<String>],
   context_extensions: &[Local<Object>],
   options: CompileOptions,
@@ -296,7 +296,7 @@ pub fn compile_function<'s>(
     scope.cast_local(|sd| {
       v8__ScriptCompiler__CompileFunction(
         &*sd.get_current_context(),
-        &mut source,
+        source,
         arguments.len(),
         arguments.as_ptr(),
         context_extensions.len(),
@@ -311,7 +311,7 @@ pub fn compile_function<'s>(
 #[inline(always)]
 pub fn compile_unbound_script<'s>(
   scope: &mut HandleScope<'s>,
-  mut source: Source,
+  source: &mut Source,
   options: CompileOptions,
   no_cache_reason: NoCacheReason,
 ) -> Option<Local<'s, UnboundScript>> {
@@ -319,7 +319,7 @@ pub fn compile_unbound_script<'s>(
     scope.cast_local(|sd| {
       v8__ScriptCompiler__CompileUnboundScript(
         sd.get_isolate_ptr(),
-        &mut source,
+        source,
         options,
         no_cache_reason,
       )

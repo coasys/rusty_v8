@@ -3,6 +3,7 @@ use std::mem::MaybeUninit;
 use std::ptr::null;
 
 use crate::Context;
+use crate::Data;
 use crate::HandleScope;
 use crate::Local;
 use crate::Script;
@@ -13,9 +14,12 @@ use crate::Value;
 /// The origin, within a file, of a script.
 #[repr(C)]
 #[derive(Debug)]
-pub struct ScriptOrigin<'s>([usize; 8], PhantomData<&'s ()>);
+pub struct ScriptOrigin<'s>(
+  [u8; crate::binding::v8__ScriptOrigin_SIZE],
+  PhantomData<&'s ()>,
+);
 
-extern "C" {
+unsafe extern "C" {
   fn v8__Script__Compile(
     context: *const Context,
     source: *const String,
@@ -40,6 +44,7 @@ extern "C" {
     resource_is_opaque: bool,
     is_wasm: bool,
     is_module: bool,
+    host_defined_options: *const Data,
   );
   fn v8__ScriptOrigin__ScriptId(origin: *const ScriptOrigin) -> i32;
   fn v8__ScriptOrigin__ResourceName(
@@ -63,7 +68,7 @@ impl Script {
         v8__Script__Compile(
           sd.get_current_context(),
           &*source,
-          origin.map(|r| r as *const _).unwrap_or_else(null),
+          origin.map_or_else(null, |r| r as *const _),
         )
       })
     }
@@ -108,10 +113,11 @@ impl<'s> ScriptOrigin<'s> {
     resource_column_offset: i32,
     resource_is_shared_cross_origin: bool,
     script_id: i32,
-    source_map_url: Local<'s, Value>,
+    source_map_url: Option<Local<'s, Value>>,
     resource_is_opaque: bool,
     is_wasm: bool,
     is_module: bool,
+    host_defined_options: Option<Local<'s, Data>>,
   ) -> Self {
     unsafe {
       let mut buf = std::mem::MaybeUninit::<ScriptOrigin>::uninit();
@@ -122,10 +128,11 @@ impl<'s> ScriptOrigin<'s> {
         resource_column_offset,
         resource_is_shared_cross_origin,
         script_id,
-        &*source_map_url,
+        source_map_url.map_or_else(null, |l| &*l as *const Value),
         resource_is_opaque,
         is_wasm,
         is_module,
+        host_defined_options.map_or_else(null, |l| &*l as *const Data),
       );
       buf.assume_init()
     }

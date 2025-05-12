@@ -1,12 +1,12 @@
 // Copyright 2019-2021 the Deno authors. All rights reserved. MIT license.
-use crate::support::int;
 use crate::HandleScope;
 use crate::Isolate;
 use crate::Local;
 use crate::Primitive;
 use crate::PrimitiveArray;
+use crate::support::int;
 
-extern "C" {
+unsafe extern "C" {
   fn v8__PrimitiveArray__New(
     isolate: *mut Isolate,
     length: int,
@@ -60,7 +60,7 @@ impl PrimitiveArray {
         scope.get_isolate_ptr(),
         index as int,
         &*item,
-      )
+      );
     }
   }
 

@@ -9,27 +9,9 @@
 #include <type_traits>
 #include <utility>
 
-#include "v8/include/v8.h"
-
-// Work around a bug in the V8 headers.
-//
-// The following template is defined in v8-internal.h. It has a subtle bug that
-// indirectly makes it impossible to convert `v8::Data` handles to themselves.
-// Some methods do that impliclity so they don't compile without this hack; one
-// example is `Local<Data> MaybeLocal::FromMaybe(Local<Data> default_value)`.
-//
-// Spot the bug :)
-//
-// ```
-// template <class T>
-// V8_INLINE void PerformCastCheck(T* data) {
-//   CastCheck<std::is_base_of<Data, T>::value &&
-//             !std::is_same<Data, std::remove_cv<T>>::value>::Perform(data);
-// }
-// ```
-template <>
-template <>
-inline void v8::internal::CastCheck<true>::Perform<v8::Data>(v8::Data* data) {}
+#include "cppgc/name-provider.h"
+#include "v8-cppgc.h"
+#include "v8.h"
 
 // Check assumptions made in binding code.
 static_assert(sizeof(bool) == sizeof(uint8_t), "");
@@ -77,7 +59,9 @@ struct make_pod {
   // Using a union is a C++ trick to achieve this.
   template <class V>
   union helper {
-    static_assert(std::is_pod<P>::value, "type P must a pod type");
+    static_assert(std::is_trivial<P>::value &&
+                      std::is_standard_layout<P>::value,
+                  "type P must a pod type");
     static_assert(sizeof(V) == sizeof(P), "type P must be same size as type V");
     static_assert(alignof(V) == alignof(P),
                   "alignment of type P must be compatible with that of type V");
@@ -176,4 +160,31 @@ struct three_pointers_t {
 
 }  // namespace support
 
+struct memory_span_t {
+  uint8_t* data;
+  size_t size;
+};
+
+#define EACH_TYPED_ARRAY(V) \
+  V(Uint8Array)             \
+  V(Uint8ClampedArray)      \
+  V(Int8Array)              \
+  V(Uint16Array)            \
+  V(Int16Array)             \
+  V(Uint32Array)            \
+  V(Int32Array)             \
+  V(Float32Array)           \
+  V(Float64Array)           \
+  V(BigUint64Array)         \
+  V(BigInt64Array)
+
 #endif  // SUPPORT_H_
+
+class RustObj : public cppgc::GarbageCollected<RustObj>,
+                public cppgc::NameProvider {
+ public:
+  ~RustObj();
+  void Trace(cppgc::Visitor* visitor) const;
+  const char* GetHumanReadableName() const final;
+  uintptr_t data[2];
+};

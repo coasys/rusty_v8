@@ -1,30 +1,8 @@
 // Copyright 2019-2021 the Deno authors. All rights reserved. MIT license.
-use crate::cppgc::Heap;
-use crate::function::FunctionCallbackInfo;
-use crate::gc::GCCallbackFlags;
-use crate::gc::GCType;
-use crate::handle::FinalizerCallback;
-use crate::handle::FinalizerMap;
-use crate::isolate_create_params::raw;
-use crate::isolate_create_params::CreateParams;
-use crate::promise::PromiseRejectMessage;
-use crate::scope::data::ScopeData;
-use crate::snapshot::SnapshotCreator;
-use crate::support::char;
-use crate::support::int;
-use crate::support::Allocated;
-use crate::support::MapFnFrom;
-use crate::support::MapFnTo;
-use crate::support::Opaque;
-use crate::support::ToCFn;
-use crate::support::UnitType;
-use crate::wasm::trampoline;
-use crate::wasm::WasmStreaming;
 use crate::Array;
 use crate::CallbackScope;
 use crate::Context;
 use crate::Data;
-use crate::ExternalReferences;
 use crate::FixedArray;
 use crate::Function;
 use crate::FunctionCodeHandling;
@@ -33,39 +11,69 @@ use crate::Local;
 use crate::Message;
 use crate::Module;
 use crate::Object;
+use crate::Platform;
 use crate::Promise;
 use crate::PromiseResolver;
 use crate::StartupData;
 use crate::String;
+use crate::V8::get_current_platform;
 use crate::Value;
+use crate::binding::v8__HeapSpaceStatistics;
+use crate::binding::v8__HeapStatistics;
+use crate::binding::v8__Isolate__UseCounterFeature;
+pub use crate::binding::v8__ModuleImportPhase as ModuleImportPhase;
+use crate::cppgc::Heap;
+use crate::external_references::ExternalReference;
+use crate::function::FunctionCallbackInfo;
+use crate::gc::GCCallbackFlags;
+use crate::gc::GCType;
+use crate::handle::FinalizerCallback;
+use crate::handle::FinalizerMap;
+use crate::isolate_create_params::CreateParams;
+use crate::isolate_create_params::raw;
+use crate::promise::PromiseRejectMessage;
+use crate::scope::data::ScopeData;
+use crate::snapshot::SnapshotCreator;
+use crate::support::MapFnFrom;
+use crate::support::MapFnTo;
+use crate::support::Opaque;
+use crate::support::ToCFn;
+use crate::support::UnitType;
+use crate::support::char;
+use crate::support::int;
+use crate::support::size_t;
+use crate::wasm::WasmStreaming;
+use crate::wasm::trampoline;
+use std::ffi::CStr;
 
 use std::any::Any;
 use std::any::TypeId;
+use std::borrow::Cow;
 use std::collections::HashMap;
 use std::ffi::c_void;
 use std::fmt::{self, Debug, Formatter};
 use std::hash::BuildHasher;
 use std::hash::Hasher;
+use std::mem::MaybeUninit;
 use std::mem::align_of;
 use std::mem::forget;
 use std::mem::needs_drop;
 use std::mem::size_of;
-use std::mem::MaybeUninit;
 use std::ops::Deref;
 use std::ops::DerefMut;
 use std::ptr;
+use std::ptr::NonNull;
 use std::ptr::addr_of_mut;
 use std::ptr::drop_in_place;
 use std::ptr::null_mut;
-use std::ptr::NonNull;
 use std::sync::Arc;
 use std::sync::Mutex;
 
 /// Policy for running microtasks:
 ///   - explicit: microtasks are invoked with the
-///               Isolate::PerformMicrotaskCheckpoint() method;
+///     Isolate::PerformMicrotaskCheckpoint() method;
 ///   - auto: microtasks are invoked when the script call depth decrements
-///           to zero.
+///     to zero.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(C)]
 pub enum MicrotasksPolicy {
@@ -80,6 +88,8 @@ pub enum MicrotasksPolicy {
 /// of higher latency due to garbage collection pauses.
 /// Critical hints V8 to free memory as soon as possible. Garbage collection
 /// pauses at this level will be large.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(C)]
 pub enum MemoryPressureLevel {
   None = 0,
   Moderate = 1,
@@ -136,7 +146,7 @@ pub enum GarbageCollectionType {
   Minor,
 }
 
-pub type MessageCallback = extern "C" fn(Local<Message>, Local<Value>);
+pub type MessageCallback = unsafe extern "C" fn(Local<Message>, Local<Value>);
 
 bitflags! {
   #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -152,9 +162,9 @@ bitflags! {
 }
 
 pub type PromiseHook =
-  extern "C" fn(PromiseHookType, Local<Promise>, Local<Value>);
+  unsafe extern "C" fn(PromiseHookType, Local<Promise>, Local<Value>);
 
-pub type PromiseRejectCallback = extern "C" fn(PromiseRejectMessage);
+pub type PromiseRejectCallback = unsafe extern "C" fn(PromiseRejectMessage);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(C)]
@@ -162,13 +172,16 @@ pub enum WasmAsyncSuccess {
   Success,
   Fail,
 }
-pub type WasmAsyncResolvePromiseCallback = extern "C" fn(
+pub type WasmAsyncResolvePromiseCallback = unsafe extern "C" fn(
   *mut Isolate,
   Local<Context>,
   Local<PromiseResolver>,
   Local<Value>,
   WasmAsyncSuccess,
 );
+
+pub type AllowWasmCodeGenerationCallback =
+  unsafe extern "C" fn(Local<Context>, Local<String>) -> bool;
 
 /// HostInitializeImportMetaObjectCallback is called the first time import.meta
 /// is accessed for a module. Subsequent access will reuse the same value.
@@ -179,16 +192,19 @@ pub type WasmAsyncResolvePromiseCallback = extern "C" fn(
 /// The embedder should use v8::Object::CreateDataProperty to add properties on
 /// the meta object.
 pub type HostInitializeImportMetaObjectCallback =
-  extern "C" fn(Local<Context>, Local<Module>, Local<Object>);
+  unsafe extern "C" fn(Local<Context>, Local<Module>, Local<Object>);
 
 /// HostImportModuleDynamicallyCallback is called when we require the embedder
 /// to load a module. This is used as part of the dynamic import syntax.
 ///
-/// The referrer contains metadata about the script/module that calls import.
+/// The host_defined_options are metadata provided by the host environment, which may be used
+/// to customize or further specify how the module should be imported.
+///
+/// The resource_name is the identifier or path for the module or script making the import request.
 ///
 /// The specifier is the name of the module that should be imported.
 ///
-/// The import_assertions are import assertions for this request in the form:
+/// The import_attributes are import assertions for this request in the form:
 /// [key1, value1, key2, value2, ...] where the keys and values are of type
 /// v8::String. Note, unlike the FixedArray passed to ResolveModuleCallback and
 /// returned from ModuleRequest::GetImportAssertions(), this array does not
@@ -212,7 +228,7 @@ pub type HostInitializeImportMetaObjectCallback =
 ///   host_defined_options: v8::Local<'s, v8::Data>,
 ///   resource_name: v8::Local<'s, v8::Value>,
 ///   specifier: v8::Local<'s, v8::String>,
-///   import_assertions: v8::Local<'s, v8::FixedArray>,
+///   import_attributes: v8::Local<'s, v8::FixedArray>,
 /// ) -> Option<v8::Local<'s, v8::Promise>> {
 ///   todo!()
 /// }
@@ -232,7 +248,7 @@ pub trait HostImportModuleDynamicallyCallback:
 
 #[cfg(target_family = "unix")]
 pub(crate) type RawHostImportModuleDynamicallyCallback =
-  for<'s> extern "C" fn(
+  for<'s> unsafe extern "C" fn(
     Local<'s, Context>,
     Local<'s, Data>,
     Local<'s, Value>,
@@ -242,7 +258,7 @@ pub(crate) type RawHostImportModuleDynamicallyCallback =
 
 #[cfg(all(target_family = "windows", target_arch = "x86_64"))]
 pub type RawHostImportModuleDynamicallyCallback =
-  for<'s> extern "C" fn(
+  for<'s> unsafe extern "C" fn(
     *mut *mut Promise,
     Local<'s, Context>,
     Local<'s, Data>,
@@ -270,7 +286,7 @@ where
       host_defined_options: Local<'s, Data>,
       resource_name: Local<'s, Value>,
       specifier: Local<'s, String>,
-      import_assertions: Local<'s, FixedArray>,
+      import_attributes: Local<'s, FixedArray>,
     ) -> Option<Local<'s, Promise>> {
       let scope = &mut unsafe { CallbackScope::new(context) };
       (F::get())(
@@ -278,39 +294,44 @@ where
         host_defined_options,
         resource_name,
         specifier,
-        import_assertions,
+        import_attributes,
       )
     }
 
     #[cfg(target_family = "unix")]
     #[inline(always)]
-    extern "C" fn abi_adapter<'s, F: HostImportModuleDynamicallyCallback>(
+    unsafe extern "C" fn abi_adapter<
+      's,
+      F: HostImportModuleDynamicallyCallback,
+    >(
       context: Local<'s, Context>,
       host_defined_options: Local<'s, Data>,
       resource_name: Local<'s, Value>,
       specifier: Local<'s, String>,
-      import_assertions: Local<'s, FixedArray>,
+      import_attributes: Local<'s, FixedArray>,
     ) -> *mut Promise {
       scope_adapter::<F>(
         context,
         host_defined_options,
         resource_name,
         specifier,
-        import_assertions,
+        import_attributes,
       )
-      .map(|return_value| return_value.as_non_null().as_ptr())
-      .unwrap_or_else(null_mut)
+      .map_or_else(null_mut, |return_value| return_value.as_non_null().as_ptr())
     }
 
     #[cfg(all(target_family = "windows", target_arch = "x86_64"))]
     #[inline(always)]
-    extern "C" fn abi_adapter<'s, F: HostImportModuleDynamicallyCallback>(
+    unsafe extern "C" fn abi_adapter<
+      's,
+      F: HostImportModuleDynamicallyCallback,
+    >(
       return_value: *mut *mut Promise,
       context: Local<'s, Context>,
       host_defined_options: Local<'s, Data>,
       resource_name: Local<'s, Value>,
       specifier: Local<'s, String>,
-      import_assertions: Local<'s, FixedArray>,
+      import_attributes: Local<'s, FixedArray>,
     ) -> *mut *mut Promise {
       unsafe {
         std::ptr::write(
@@ -320,7 +341,172 @@ where
             host_defined_options,
             resource_name,
             specifier,
-            import_assertions,
+            import_attributes,
+          )
+          .map(|return_value| return_value.as_non_null().as_ptr())
+          .unwrap_or_else(null_mut),
+        );
+        return_value
+      }
+    }
+
+    abi_adapter::<F>
+  }
+}
+
+/// HostImportModuleWithPhaseDynamicallyCallback is called when we
+/// require the embedder to load a module with a specific phase. This is used
+/// as part of the dynamic import syntax.
+///
+/// The referrer contains metadata about the script/module that calls
+/// import.
+///
+/// The specifier is the name of the module that should be imported.
+///
+/// The phase is the phase of the import requested.
+///
+/// The import_attributes are import attributes for this request in the form:
+/// [key1, value1, key2, value2, ...] where the keys and values are of type
+/// v8::String. Note, unlike the FixedArray passed to ResolveModuleCallback and
+/// returned from ModuleRequest::GetImportAttributes(), this array does not
+/// contain the source Locations of the attributes.
+///
+/// The Promise returned from this function is forwarded to userland
+/// JavaScript. The embedder must resolve this promise according to the phase
+/// requested:
+/// - For ModuleImportPhase::kSource, the promise must be resolved with a
+///   compiled ModuleSource object, or rejected with a SyntaxError if the
+///   module does not support source representation.
+/// - For ModuleImportPhase::kEvaluation, the promise must be resolved with a
+///   ModuleNamespace object of a module that has been compiled, instantiated,
+///   and evaluated.
+///
+/// In case of an exception, the embedder must reject this promise with the
+/// exception. If the promise creation itself fails (e.g. due to stack
+/// overflow), the embedder must propagate that exception by returning an empty
+/// MaybeLocal.
+///
+/// This callback is still experimental and is only invoked for source phase
+/// imports.
+pub trait HostImportModuleWithPhaseDynamicallyCallback:
+  UnitType
+  + for<'s> FnOnce(
+    &mut HandleScope<'s>,
+    Local<'s, Data>,
+    Local<'s, Value>,
+    Local<'s, String>,
+    ModuleImportPhase,
+    Local<'s, FixedArray>,
+  ) -> Option<Local<'s, Promise>>
+{
+  fn to_c_fn(self) -> RawHostImportModuleWithPhaseDynamicallyCallback;
+}
+
+#[cfg(target_family = "unix")]
+pub(crate) type RawHostImportModuleWithPhaseDynamicallyCallback =
+  for<'s> unsafe extern "C" fn(
+    Local<'s, Context>,
+    Local<'s, Data>,
+    Local<'s, Value>,
+    Local<'s, String>,
+    ModuleImportPhase,
+    Local<'s, FixedArray>,
+  ) -> *mut Promise;
+
+#[cfg(all(target_family = "windows", target_arch = "x86_64"))]
+pub type RawHostImportModuleWithPhaseDynamicallyCallback =
+  for<'s> unsafe extern "C" fn(
+    *mut *mut Promise,
+    Local<'s, Context>,
+    Local<'s, Data>,
+    Local<'s, Value>,
+    Local<'s, String>,
+    ModuleImportPhase,
+    Local<'s, FixedArray>,
+  ) -> *mut *mut Promise;
+
+impl<F> HostImportModuleWithPhaseDynamicallyCallback for F
+where
+  F: UnitType
+    + for<'s> FnOnce(
+      &mut HandleScope<'s>,
+      Local<'s, Data>,
+      Local<'s, Value>,
+      Local<'s, String>,
+      ModuleImportPhase,
+      Local<'s, FixedArray>,
+    ) -> Option<Local<'s, Promise>>,
+{
+  #[inline(always)]
+  fn to_c_fn(self) -> RawHostImportModuleWithPhaseDynamicallyCallback {
+    #[inline(always)]
+    fn scope_adapter<'s, F: HostImportModuleWithPhaseDynamicallyCallback>(
+      context: Local<'s, Context>,
+      host_defined_options: Local<'s, Data>,
+      resource_name: Local<'s, Value>,
+      specifier: Local<'s, String>,
+      import_phase: ModuleImportPhase,
+      import_attributes: Local<'s, FixedArray>,
+    ) -> Option<Local<'s, Promise>> {
+      let scope = &mut unsafe { CallbackScope::new(context) };
+      (F::get())(
+        scope,
+        host_defined_options,
+        resource_name,
+        specifier,
+        import_phase,
+        import_attributes,
+      )
+    }
+
+    #[cfg(target_family = "unix")]
+    #[inline(always)]
+    unsafe extern "C" fn abi_adapter<
+      's,
+      F: HostImportModuleWithPhaseDynamicallyCallback,
+    >(
+      context: Local<'s, Context>,
+      host_defined_options: Local<'s, Data>,
+      resource_name: Local<'s, Value>,
+      specifier: Local<'s, String>,
+      import_phase: ModuleImportPhase,
+      import_attributes: Local<'s, FixedArray>,
+    ) -> *mut Promise {
+      scope_adapter::<F>(
+        context,
+        host_defined_options,
+        resource_name,
+        specifier,
+        import_phase,
+        import_attributes,
+      )
+      .map_or_else(null_mut, |return_value| return_value.as_non_null().as_ptr())
+    }
+
+    #[cfg(all(target_family = "windows", target_arch = "x86_64"))]
+    #[inline(always)]
+    unsafe extern "C" fn abi_adapter<
+      's,
+      F: HostImportModuleWithPhaseDynamicallyCallback,
+    >(
+      return_value: *mut *mut Promise,
+      context: Local<'s, Context>,
+      host_defined_options: Local<'s, Data>,
+      resource_name: Local<'s, Value>,
+      specifier: Local<'s, String>,
+      import_phase: ModuleImportPhase,
+      import_attributes: Local<'s, FixedArray>,
+    ) -> *mut *mut Promise {
+      unsafe {
+        std::ptr::write(
+          return_value,
+          scope_adapter::<F>(
+            context,
+            host_defined_options,
+            resource_name,
+            specifier,
+            import_phase,
+            import_attributes,
           )
           .map(|return_value| return_value.as_non_null().as_ptr())
           .unwrap_or_else(null_mut),
@@ -346,7 +532,7 @@ where
 pub type HostCreateShadowRealmContextCallback =
   for<'s> fn(scope: &mut HandleScope<'s>) -> Option<Local<'s, Context>>;
 
-pub type GcCallbackWithData = extern "C" fn(
+pub type GcCallbackWithData = unsafe extern "C" fn(
   isolate: *mut Isolate,
   r#type: GCType,
   flags: GCCallbackFlags,
@@ -354,9 +540,9 @@ pub type GcCallbackWithData = extern "C" fn(
 );
 
 pub type InterruptCallback =
-  extern "C" fn(isolate: &mut Isolate, data: *mut c_void);
+  unsafe extern "C" fn(isolate: &mut Isolate, data: *mut c_void);
 
-pub type NearHeapLimitCallback = extern "C" fn(
+pub type NearHeapLimitCallback = unsafe extern "C" fn(
   data: *mut c_void,
   current_heap_limit: usize,
   initial_heap_limit: usize,
@@ -369,25 +555,17 @@ pub struct OomDetails {
 }
 
 pub type OomErrorCallback =
-  extern "C" fn(location: *const char, details: &OomDetails);
-
-/// Collection of V8 heap information.
-///
-/// Instances of this class can be passed to v8::Isolate::GetHeapStatistics to
-/// get heap statistics from V8.
-// Must be >= sizeof(v8::HeapStatistics), see v8__HeapStatistics__CONSTRUCT().
-#[repr(C)]
-#[derive(Debug)]
-pub struct HeapStatistics([usize; 16]);
+  unsafe extern "C" fn(location: *const char, details: &OomDetails);
 
 // Windows x64 ABI: MaybeLocal<Value> returned on the stack.
 #[cfg(target_os = "windows")]
-pub type PrepareStackTraceCallback<'s> = extern "C" fn(
-  *mut *const Value,
-  Local<'s, Context>,
-  Local<'s, Value>,
-  Local<'s, Array>,
-) -> *mut *const Value;
+pub type PrepareStackTraceCallback<'s> =
+  unsafe extern "C" fn(
+    *mut *const Value,
+    Local<'s, Context>,
+    Local<'s, Value>,
+    Local<'s, Array>,
+  ) -> *mut *const Value;
 
 // System V ABI: MaybeLocal<Value> returned in a register.
 // System V i386 ABI: Local<Value> returned in hidden pointer (struct).
@@ -397,25 +575,36 @@ pub struct PrepareStackTraceCallbackRet(*const Value);
 
 #[cfg(not(target_os = "windows"))]
 pub type PrepareStackTraceCallback<'s> =
-  extern "C" fn(
+  unsafe extern "C" fn(
     Local<'s, Context>,
     Local<'s, Value>,
     Local<'s, Array>,
   ) -> PrepareStackTraceCallbackRet;
 
-extern "C" {
-  static v8__internal__Internals__kIsolateEmbedderDataOffset: int;
+pub type UseCounterFeature = v8__Isolate__UseCounterFeature;
+pub type UseCounterCallback =
+  unsafe extern "C" fn(&mut Isolate, UseCounterFeature);
 
+unsafe extern "C" {
   fn v8__Isolate__New(params: *const raw::CreateParams) -> *mut Isolate;
   fn v8__Isolate__Dispose(this: *mut Isolate);
   fn v8__Isolate__GetNumberOfDataSlots(this: *const Isolate) -> u32;
+  fn v8__Isolate__GetData(isolate: *const Isolate, slot: u32) -> *mut c_void;
+  fn v8__Isolate__SetData(
+    isolate: *const Isolate,
+    slot: u32,
+    data: *mut c_void,
+  );
   fn v8__Isolate__Enter(this: *mut Isolate);
   fn v8__Isolate__Exit(this: *mut Isolate);
   fn v8__Isolate__GetCurrent() -> *mut Isolate;
   fn v8__Isolate__MemoryPressureNotification(this: *mut Isolate, level: u8);
   fn v8__Isolate__ClearKeptObjects(isolate: *mut Isolate);
   fn v8__Isolate__LowMemoryNotification(isolate: *mut Isolate);
-  fn v8__Isolate__GetHeapStatistics(this: *mut Isolate, s: *mut HeapStatistics);
+  fn v8__Isolate__GetHeapStatistics(
+    this: *mut Isolate,
+    s: *mut v8__HeapStatistics,
+  );
   fn v8__Isolate__SetCaptureStackTraceForUncaughtExceptions(
     this: *mut Isolate,
     capture: bool,
@@ -441,6 +630,23 @@ extern "C" {
     callback: GcCallbackWithData,
     data: *mut c_void,
   );
+  fn v8__Isolate__AddGCEpilogueCallback(
+    isolate: *mut Isolate,
+    callback: GcCallbackWithData,
+    data: *mut c_void,
+    gc_type_filter: GCType,
+  );
+  fn v8__Isolate__RemoveGCEpilogueCallback(
+    isolate: *mut Isolate,
+    callback: GcCallbackWithData,
+    data: *mut c_void,
+  );
+  fn v8__Isolate__NumberOfHeapSpaces(isolate: *mut Isolate) -> size_t;
+  fn v8__Isolate__GetHeapSpaceStatistics(
+    isolate: *mut Isolate,
+    space_statistics: *mut v8__HeapSpaceStatistics,
+    index: size_t,
+  ) -> bool;
   fn v8__Isolate__AddNearHeapLimitCallback(
     isolate: *mut Isolate,
     callback: NearHeapLimitCallback,
@@ -460,7 +666,6 @@ extern "C" {
     change_in_bytes: i64,
   ) -> i64;
   fn v8__Isolate__GetCppHeap(isolate: *mut Isolate) -> *mut Heap;
-  fn v8__Isolate__AttachCppHeap(isolate: *mut Isolate, heap: *mut Heap);
   fn v8__Isolate__SetPrepareStackTraceCallback(
     isolate: *mut Isolate,
     callback: PrepareStackTraceCallback,
@@ -474,6 +679,10 @@ extern "C" {
     isolate: *mut Isolate,
     callback: WasmAsyncResolvePromiseCallback,
   );
+  fn v8__Isolate__SetAllowWasmCodeGenerationCallback(
+    isolate: *mut Isolate,
+    callback: AllowWasmCodeGenerationCallback,
+  );
   fn v8__Isolate__SetHostInitializeImportMetaObjectCallback(
     isolate: *mut Isolate,
     callback: HostInitializeImportMetaObjectCallback,
@@ -482,18 +691,28 @@ extern "C" {
     isolate: *mut Isolate,
     callback: RawHostImportModuleDynamicallyCallback,
   );
+  fn v8__Isolate__SetHostImportModuleWithPhaseDynamicallyCallback(
+    isolate: *mut Isolate,
+    callback: RawHostImportModuleWithPhaseDynamicallyCallback,
+  );
   #[cfg(not(target_os = "windows"))]
   fn v8__Isolate__SetHostCreateShadowRealmContextCallback(
     isolate: *mut Isolate,
-    callback: extern "C" fn(initiator_context: Local<Context>) -> *mut Context,
+    callback: unsafe extern "C" fn(
+      initiator_context: Local<Context>,
+    ) -> *mut Context,
   );
   #[cfg(target_os = "windows")]
   fn v8__Isolate__SetHostCreateShadowRealmContextCallback(
     isolate: *mut Isolate,
-    callback: extern "C" fn(
+    callback: unsafe extern "C" fn(
       rv: *mut *mut Context,
       initiator_context: Local<Context>,
     ) -> *mut *mut Context,
+  );
+  fn v8__Isolate__SetUseCounterCallback(
+    isolate: *mut Isolate,
+    callback: UseCounterCallback,
   );
   fn v8__Isolate__RequestInterrupt(
     isolate: *const Isolate,
@@ -518,7 +737,7 @@ extern "C" {
   fn v8__Isolate__SetAllowAtomicsWait(isolate: *mut Isolate, allow: bool);
   fn v8__Isolate__SetWasmStreamingCallback(
     isolate: *mut Isolate,
-    callback: extern "C" fn(*const FunctionCallbackInfo),
+    callback: unsafe extern "C" fn(*const FunctionCallbackInfo),
   );
   fn v8__Isolate__DateTimeConfigurationChangeNotification(
     isolate: *mut Isolate,
@@ -535,37 +754,6 @@ extern "C" {
     callback: unsafe extern "C" fn(*mut c_void, *const u8, usize) -> bool,
     arg: *mut c_void,
   );
-
-  fn v8__HeapStatistics__CONSTRUCT(s: *mut MaybeUninit<HeapStatistics>);
-  fn v8__HeapStatistics__total_heap_size(s: *const HeapStatistics) -> usize;
-  fn v8__HeapStatistics__total_heap_size_executable(
-    s: *const HeapStatistics,
-  ) -> usize;
-  fn v8__HeapStatistics__total_physical_size(s: *const HeapStatistics)
-    -> usize;
-  fn v8__HeapStatistics__total_available_size(
-    s: *const HeapStatistics,
-  ) -> usize;
-  fn v8__HeapStatistics__total_global_handles_size(
-    s: *const HeapStatistics,
-  ) -> usize;
-  fn v8__HeapStatistics__used_global_handles_size(
-    s: *const HeapStatistics,
-  ) -> usize;
-  fn v8__HeapStatistics__used_heap_size(s: *const HeapStatistics) -> usize;
-  fn v8__HeapStatistics__heap_size_limit(s: *const HeapStatistics) -> usize;
-  fn v8__HeapStatistics__malloced_memory(s: *const HeapStatistics) -> usize;
-  fn v8__HeapStatistics__external_memory(s: *const HeapStatistics) -> usize;
-  fn v8__HeapStatistics__peak_malloced_memory(
-    s: *const HeapStatistics,
-  ) -> usize;
-  fn v8__HeapStatistics__number_of_native_contexts(
-    s: *const HeapStatistics,
-  ) -> usize;
-  fn v8__HeapStatistics__number_of_detached_contexts(
-    s: *const HeapStatistics,
-  ) -> usize;
-  fn v8__HeapStatistics__does_zap_garbage(s: *const HeapStatistics) -> usize;
 }
 
 /// Isolate represents an isolated instance of the V8 engine.  V8 isolates have
@@ -583,14 +771,6 @@ extern "C" {
 pub struct Isolate(Opaque);
 
 impl Isolate {
-  // Total number of isolate data slots provided by V8.
-  const EMBEDDER_DATA_SLOT_COUNT: u32 = 4;
-
-  // Byte offset inside `Isolate` where the isolate data slots are stored. This
-  // should be the same as the value of `kIsolateEmbedderDataOffset` which is
-  // defined in `v8-internal.h`.
-  const EMBEDDER_DATA_OFFSET: usize = size_of::<[*const (); 67]>();
-
   // Isolate data slots used internally by rusty_v8.
   const ANNEX_SLOT: u32 = 0;
   const CURRENT_SCOPE_DATA_SLOT: u32 = 1;
@@ -598,14 +778,10 @@ impl Isolate {
 
   #[inline(always)]
   fn assert_embedder_data_slot_count_and_offset_correct(&self) {
-    assert_eq!(
-      unsafe { v8__Isolate__GetNumberOfDataSlots(self) },
-      Self::EMBEDDER_DATA_SLOT_COUNT
-    );
-    assert_eq!(
-      unsafe { v8__internal__Internals__kIsolateEmbedderDataOffset } as usize,
-      Self::EMBEDDER_DATA_OFFSET
-    );
+    assert!(
+      unsafe { v8__Isolate__GetNumberOfDataSlots(self) }
+        >= Self::INTERNAL_DATA_SLOT_COUNT
+    )
   }
 
   fn new_impl(params: CreateParams) -> *mut Isolate {
@@ -636,19 +812,22 @@ impl Isolate {
 
   #[allow(clippy::new_ret_no_self)]
   pub fn snapshot_creator(
-    external_references: Option<&'static ExternalReferences>,
+    external_references: Option<Cow<'static, [ExternalReference]>>,
+    params: Option<CreateParams>,
   ) -> OwnedIsolate {
-    SnapshotCreator::new(external_references)
+    SnapshotCreator::new(external_references, params)
   }
 
   #[allow(clippy::new_ret_no_self)]
   pub fn snapshot_creator_from_existing_snapshot(
-    existing_snapshot_blob: impl Allocated<[u8]>,
-    external_references: Option<&'static ExternalReferences>,
+    existing_snapshot_blob: StartupData,
+    external_references: Option<Cow<'static, [ExternalReference]>>,
+    params: Option<CreateParams>,
   ) -> OwnedIsolate {
     SnapshotCreator::from_existing_snapshot(
       existing_snapshot_blob,
       external_references,
+      params,
     )
   }
 
@@ -691,7 +870,7 @@ impl Isolate {
     self.set_data_internal(Self::ANNEX_SLOT, annex_ptr as *mut _);
   }
 
-  unsafe fn dispose_annex(&mut self) {
+  unsafe fn dispose_annex(&mut self) -> Box<dyn Any> {
     // Set the `isolate` pointer inside the annex struct to null, so any
     // IsolateHandle that outlives the isolate will know that it can't call
     // methods on the isolate.
@@ -702,7 +881,8 @@ impl Isolate {
     }
 
     // Clear slots and drop owned objects that were taken out of `CreateParams`.
-    annex.create_param_allocations = Box::new(());
+    let create_param_allocations =
+      std::mem::replace(&mut annex.create_param_allocations, Box::new(()));
     annex.slots.clear();
 
     // Run through any remaining guaranteed finalizers.
@@ -715,6 +895,8 @@ impl Isolate {
     // Subtract one from the Arc<IsolateAnnex> reference count.
     unsafe { Arc::from_raw(annex) };
     self.set_data(0, null_mut());
+
+    create_param_allocations
   }
 
   #[inline(always)]
@@ -769,35 +951,24 @@ impl Isolate {
   /// between 0 and `Isolate::get_number_of_data_slots()`.
   #[inline(always)]
   pub fn set_data(&mut self, slot: u32, data: *mut c_void) {
-    self.set_data_internal(Self::INTERNAL_DATA_SLOT_COUNT + slot, data)
+    self.set_data_internal(Self::INTERNAL_DATA_SLOT_COUNT + slot, data);
   }
 
   /// Returns the maximum number of available embedder data slots. Valid slots
   /// are in the range of `0 <= n < Isolate::get_number_of_data_slots()`.
   pub fn get_number_of_data_slots(&self) -> u32 {
-    Self::EMBEDDER_DATA_SLOT_COUNT - Self::INTERNAL_DATA_SLOT_COUNT
+    let n = unsafe { v8__Isolate__GetNumberOfDataSlots(self) };
+    n - Self::INTERNAL_DATA_SLOT_COUNT
   }
 
   #[inline(always)]
   pub(crate) fn get_data_internal(&self, slot: u32) -> *mut c_void {
-    let slots = unsafe {
-      let p = self as *const Self as *const u8;
-      let p = p.add(Self::EMBEDDER_DATA_OFFSET);
-      let p = p as *const [*mut c_void; Self::EMBEDDER_DATA_SLOT_COUNT as _];
-      &*p
-    };
-    slots[slot as usize]
+    unsafe { v8__Isolate__GetData(self, slot) }
   }
 
   #[inline(always)]
   pub(crate) fn set_data_internal(&mut self, slot: u32, data: *mut c_void) {
-    let slots = unsafe {
-      let p = self as *mut Self as *mut u8;
-      let p = p.add(Self::EMBEDDER_DATA_OFFSET);
-      let p = p as *mut [*mut c_void; Self::EMBEDDER_DATA_SLOT_COUNT as _];
-      &mut *p
-    };
-    slots[slot as usize] = data;
+    unsafe { v8__Isolate__SetData(self, slot, data) }
   }
 
   pub(crate) fn init_scope_root(&mut self) {
@@ -823,8 +994,7 @@ impl Isolate {
   ) {
     let scope_data_ptr = scope_data
       .map(NonNull::cast)
-      .map(NonNull::as_ptr)
-      .unwrap_or_else(null_mut);
+      .map_or_else(null_mut, NonNull::as_ptr);
     self.set_data_internal(Self::CURRENT_SCOPE_DATA_SLOT, scope_data_ptr);
   }
 
@@ -886,7 +1056,9 @@ impl Isolate {
   /// constructed and exited when dropped.
   #[inline(always)]
   pub unsafe fn enter(&mut self) {
-    v8__Isolate__Enter(self)
+    unsafe {
+      v8__Isolate__Enter(self);
+    }
   }
 
   /// Exits this isolate by restoring the previously entered one in the
@@ -899,7 +1071,9 @@ impl Isolate {
   /// constructed and exited when dropped.
   #[inline(always)]
   pub unsafe fn exit(&mut self) {
-    v8__Isolate__Exit(self)
+    unsafe {
+      v8__Isolate__Exit(self);
+    }
   }
 
   /// Optional notification that the system is running low on memory.
@@ -936,8 +1110,41 @@ impl Isolate {
 
   /// Get statistics about the heap memory usage.
   #[inline(always)]
-  pub fn get_heap_statistics(&mut self, s: &mut HeapStatistics) {
-    unsafe { v8__Isolate__GetHeapStatistics(self, s) }
+  pub fn get_heap_statistics(&mut self) -> HeapStatistics {
+    let inner = unsafe {
+      let mut s = MaybeUninit::zeroed();
+      v8__Isolate__GetHeapStatistics(self, s.as_mut_ptr());
+      s.assume_init()
+    };
+    HeapStatistics(inner)
+  }
+
+  /// Returns the number of spaces in the heap.
+  #[inline(always)]
+  pub fn number_of_heap_spaces(&mut self) -> usize {
+    unsafe { v8__Isolate__NumberOfHeapSpaces(self) }
+  }
+
+  /// Get the memory usage of a space in the heap.
+  ///
+  /// \param space_statistics The HeapSpaceStatistics object to fill in
+  ///   statistics.
+  /// \param index The index of the space to get statistics from, which ranges
+  ///   from 0 to NumberOfHeapSpaces() - 1.
+  /// \returns true on success.
+  #[inline(always)]
+  pub fn get_heap_space_statistics(
+    &mut self,
+    index: usize,
+  ) -> Option<HeapSpaceStatistics> {
+    let inner = unsafe {
+      let mut s = MaybeUninit::zeroed();
+      if !v8__Isolate__GetHeapSpaceStatistics(self, s.as_mut_ptr(), index) {
+        return None;
+      }
+      s.assume_init()
+    };
+    Some(HeapSpaceStatistics(inner))
   }
 
   /// Tells V8 to capture current stack trace when uncaught exception occurs
@@ -953,7 +1160,7 @@ impl Isolate {
         self,
         capture,
         frame_limit,
-      )
+      );
     }
   }
 
@@ -1001,7 +1208,7 @@ impl Isolate {
     // it's empty. That is, you can't return None and that's why the Rust API
     // expects Local<Value> instead of Option<Local<Value>>.
     unsafe {
-      v8__Isolate__SetPrepareStackTraceCallback(self, callback.map_fn_to())
+      v8__Isolate__SetPrepareStackTraceCallback(self, callback.map_fn_to());
     };
   }
 
@@ -1031,6 +1238,16 @@ impl Isolate {
   }
 
   #[inline(always)]
+  pub fn set_allow_wasm_code_generation_callback(
+    &mut self,
+    callback: AllowWasmCodeGenerationCallback,
+  ) {
+    unsafe {
+      v8__Isolate__SetAllowWasmCodeGenerationCallback(self, callback);
+    }
+  }
+
+  #[inline(always)]
   /// This specifies the callback called by the upcoming importa.meta
   /// language feature to retrieve host-defined meta data for a module.
   pub fn set_host_initialize_import_meta_object_callback(
@@ -1038,7 +1255,7 @@ impl Isolate {
     callback: HostInitializeImportMetaObjectCallback,
   ) {
     unsafe {
-      v8__Isolate__SetHostInitializeImportMetaObjectCallback(self, callback)
+      v8__Isolate__SetHostInitializeImportMetaObjectCallback(self, callback);
     }
   }
 
@@ -1053,7 +1270,27 @@ impl Isolate {
       v8__Isolate__SetHostImportModuleDynamicallyCallback(
         self,
         callback.to_c_fn(),
-      )
+      );
+    }
+  }
+
+  /// This specifies the callback called by the upcoming dynamic
+  /// import() and import.source() language feature to load modules.
+  ///
+  /// This API is experimental and is expected to be changed or removed in the
+  /// future. The callback is currently only called when for source-phase
+  /// imports. Evaluation-phase imports use the existing
+  /// HostImportModuleDynamicallyCallback callback.
+  #[inline(always)]
+  pub fn set_host_import_module_with_phase_dynamically_callback(
+    &mut self,
+    callback: impl HostImportModuleWithPhaseDynamicallyCallback,
+  ) {
+    unsafe {
+      v8__Isolate__SetHostImportModuleWithPhaseDynamicallyCallback(
+        self,
+        callback.to_c_fn(),
+      );
     }
   }
 
@@ -1064,7 +1301,7 @@ impl Isolate {
     callback: HostCreateShadowRealmContextCallback,
   ) {
     #[inline]
-    extern "C" fn rust_shadow_realm_callback(
+    unsafe extern "C" fn rust_shadow_realm_callback(
       initiator_context: Local<Context>,
     ) -> *mut Context {
       let mut scope = unsafe { CallbackScope::new(initiator_context) };
@@ -1072,19 +1309,17 @@ impl Isolate {
         .get_slot::<HostCreateShadowRealmContextCallback>()
         .unwrap();
       let context = callback(&mut scope);
-      context
-        .map(|l| l.as_non_null().as_ptr())
-        .unwrap_or_else(null_mut)
+      context.map_or_else(null_mut, |l| l.as_non_null().as_ptr())
     }
 
     // Windows x64 ABI: MaybeLocal<Context> must be returned on the stack.
     #[cfg(target_os = "windows")]
-    extern "C" fn rust_shadow_realm_callback_windows(
+    unsafe extern "C" fn rust_shadow_realm_callback_windows(
       rv: *mut *mut Context,
       initiator_context: Local<Context>,
     ) -> *mut *mut Context {
-      let ret = rust_shadow_realm_callback(initiator_context);
       unsafe {
+        let ret = rust_shadow_realm_callback(initiator_context);
         rv.write(ret);
       }
       rv
@@ -1107,6 +1342,14 @@ impl Isolate {
     }
   }
 
+  /// Sets a callback for counting the number of times a feature of V8 is used.
+  #[inline(always)]
+  pub fn set_use_counter_callback(&mut self, callback: UseCounterCallback) {
+    unsafe {
+      v8__Isolate__SetUseCounterCallback(self, callback);
+    }
+  }
+
   /// Enables the host application to receive a notification before a
   /// garbage collection. Allocations are allowed in the callback function,
   /// but the callback is not re-entrant: if the allocation inside it will
@@ -1123,7 +1366,7 @@ impl Isolate {
     gc_type_filter: GCType,
   ) {
     unsafe {
-      v8__Isolate__AddGCPrologueCallback(self, callback, data, gc_type_filter)
+      v8__Isolate__AddGCPrologueCallback(self, callback, data, gc_type_filter);
     }
   }
 
@@ -1137,6 +1380,33 @@ impl Isolate {
     data: *mut c_void,
   ) {
     unsafe { v8__Isolate__RemoveGCPrologueCallback(self, callback, data) }
+  }
+
+  /// Enables the host application to receive a notification after a
+  /// garbage collection.
+  #[allow(clippy::not_unsafe_ptr_arg_deref)] // False positive.
+  #[inline(always)]
+  pub fn add_gc_epilogue_callback(
+    &mut self,
+    callback: GcCallbackWithData,
+    data: *mut c_void,
+    gc_type_filter: GCType,
+  ) {
+    unsafe {
+      v8__Isolate__AddGCEpilogueCallback(self, callback, data, gc_type_filter);
+    }
+  }
+
+  /// This function removes a callback which was added by
+  /// `AddGCEpilogueCallback`.
+  #[allow(clippy::not_unsafe_ptr_arg_deref)] // False positive.
+  #[inline(always)]
+  pub fn remove_gc_epilogue_callback(
+    &mut self,
+    callback: GcCallbackWithData,
+    data: *mut c_void,
+  ) {
+    unsafe { v8__Isolate__RemoveGCEpilogueCallback(self, callback, data) }
   }
 
   /// Add a callback to invoke in case the heap size is close to the heap limit.
@@ -1163,7 +1433,7 @@ impl Isolate {
     heap_limit: usize,
   ) {
     unsafe {
-      v8__Isolate__RemoveNearHeapLimitCallback(self, callback, heap_limit)
+      v8__Isolate__RemoveNearHeapLimitCallback(self, callback, heap_limit);
     };
   }
 
@@ -1184,17 +1454,7 @@ impl Isolate {
     }
   }
 
-  /// Attaches a managed C++ heap as an extension to the JavaScript heap.
-  ///
-  /// The embedder maintains ownership of the CppHeap. At most one C++ heap
-  /// can be attached to V8.
   #[inline(always)]
-  pub fn attach_cpp_heap(&mut self, heap: &Heap) {
-    unsafe {
-      v8__Isolate__AttachCppHeap(self, heap as *const Heap as *mut _);
-    }
-  }
-
   pub fn get_cpp_heap(&mut self) -> Option<&Heap> {
     unsafe { v8__Isolate__GetCppHeap(self).as_ref() }
   }
@@ -1223,12 +1483,6 @@ impl Isolate {
   #[inline(always)]
   pub fn perform_microtask_checkpoint(&mut self) {
     unsafe { v8__Isolate__PerformMicrotaskCheckpoint(self) }
-  }
-
-  /// An alias for PerformMicrotaskCheckpoint.
-  #[deprecated(note = "Use Isolate::perform_microtask_checkpoint() instead")]
-  pub fn run_microtasks(&mut self) {
-    self.perform_microtask_checkpoint()
   }
 
   /// Enqueues the callback to the default MicrotaskQueue
@@ -1277,7 +1531,7 @@ impl Isolate {
       v8__Isolate__DateTimeConfigurationChangeNotification(
         self,
         time_zone_detection,
-      )
+      );
     }
   }
 
@@ -1310,7 +1564,7 @@ impl Isolate {
           GarbageCollectionType::Full => 0,
           GarbageCollectionType::Minor => 1,
         },
-      )
+      );
     }
   }
 
@@ -1319,7 +1573,9 @@ impl Isolate {
   unsafe fn dispose(&mut self) {
     // No test case in rusty_v8 show this, but there have been situations in
     // deno where dropping Annex before the states causes a segfault.
-    v8__Isolate__Dispose(self);
+    unsafe {
+      v8__Isolate__Dispose(self);
+    }
   }
 
   /// Take a heap snapshot. The callback is invoked one or more times
@@ -1340,17 +1596,19 @@ impl Isolate {
     where
       F: FnMut(&[u8]) -> bool,
     {
-      let mut callback = NonNull::<F>::new_unchecked(arg as _);
-      if size > 0 {
-        (callback.as_mut())(std::slice::from_raw_parts(data, size))
-      } else {
-        (callback.as_mut())(&[])
+      unsafe {
+        let mut callback = NonNull::<F>::new_unchecked(arg as _);
+        if size > 0 {
+          (callback.as_mut())(std::slice::from_raw_parts(data, size))
+        } else {
+          (callback.as_mut())(&[])
+        }
       }
     }
 
     let arg = addr_of_mut!(callback);
     unsafe {
-      v8__HeapProfiler__TakeHeapSnapshot(self, trampoline::<F>, arg as _)
+      v8__HeapProfiler__TakeHeapSnapshot(self, trampoline::<F>, arg as _);
     }
   }
 
@@ -1626,9 +1884,10 @@ impl Drop for OwnedIsolate {
         self.cxx_isolate.as_mut() as *mut Isolate == v8__Isolate__GetCurrent(),
         "v8::OwnedIsolate instances must be dropped in the reverse order of creation. They are entered upon creation and exited upon being dropped."
       );
-      self.exit();
       self.dispose_scope_root();
+      self.exit();
       self.dispose_annex();
+      Platform::notify_isolate_shutdown(&get_current_platform(), self);
       self.dispose();
     }
   }
@@ -1648,10 +1907,14 @@ impl OwnedIsolate {
   ) -> Option<StartupData> {
     let mut snapshot_creator =
       self.get_annex_mut().maybe_snapshot_creator.take().unwrap();
-    unsafe {
+
+    // create_param_allocations is needed during CreateBlob
+    // so v8 can read external references
+    let _create_param_allocations = unsafe {
       self.dispose_scope_root();
-      self.dispose_annex();
-    }
+      self.dispose_annex()
+    };
+
     // The isolate is owned by the snapshot creator; we need to forget it
     // here as the snapshot creator will drop it when running the destructor.
     std::mem::forget(self);
@@ -1684,87 +1947,107 @@ impl AsMut<Isolate> for Isolate {
   }
 }
 
+/// Collection of V8 heap information.
+///
+/// Instances of this class can be passed to v8::Isolate::GetHeapStatistics to
+/// get heap statistics from V8.
+pub struct HeapStatistics(v8__HeapStatistics);
+
 impl HeapStatistics {
   #[inline(always)]
   pub fn total_heap_size(&self) -> usize {
-    unsafe { v8__HeapStatistics__total_heap_size(self) }
+    self.0.total_heap_size_
   }
 
   #[inline(always)]
   pub fn total_heap_size_executable(&self) -> usize {
-    unsafe { v8__HeapStatistics__total_heap_size_executable(self) }
+    self.0.total_heap_size_executable_
   }
 
   #[inline(always)]
   pub fn total_physical_size(&self) -> usize {
-    unsafe { v8__HeapStatistics__total_physical_size(self) }
+    self.0.total_physical_size_
   }
 
   #[inline(always)]
   pub fn total_available_size(&self) -> usize {
-    unsafe { v8__HeapStatistics__total_available_size(self) }
+    self.0.total_available_size_
   }
 
   #[inline(always)]
   pub fn total_global_handles_size(&self) -> usize {
-    unsafe { v8__HeapStatistics__total_global_handles_size(self) }
+    self.0.total_global_handles_size_
   }
 
   #[inline(always)]
   pub fn used_global_handles_size(&self) -> usize {
-    unsafe { v8__HeapStatistics__used_global_handles_size(self) }
+    self.0.used_global_handles_size_
   }
 
   #[inline(always)]
   pub fn used_heap_size(&self) -> usize {
-    unsafe { v8__HeapStatistics__used_heap_size(self) }
+    self.0.used_heap_size_
   }
 
   #[inline(always)]
   pub fn heap_size_limit(&self) -> usize {
-    unsafe { v8__HeapStatistics__heap_size_limit(self) }
+    self.0.heap_size_limit_
   }
 
   #[inline(always)]
   pub fn malloced_memory(&self) -> usize {
-    unsafe { v8__HeapStatistics__malloced_memory(self) }
+    self.0.malloced_memory_
   }
 
   #[inline(always)]
   pub fn external_memory(&self) -> usize {
-    unsafe { v8__HeapStatistics__external_memory(self) }
+    self.0.external_memory_
   }
 
   #[inline(always)]
   pub fn peak_malloced_memory(&self) -> usize {
-    unsafe { v8__HeapStatistics__peak_malloced_memory(self) }
+    self.0.peak_malloced_memory_
   }
 
   #[inline(always)]
   pub fn number_of_native_contexts(&self) -> usize {
-    unsafe { v8__HeapStatistics__number_of_native_contexts(self) }
+    self.0.number_of_native_contexts_
   }
 
   #[inline(always)]
   pub fn number_of_detached_contexts(&self) -> usize {
-    unsafe { v8__HeapStatistics__number_of_detached_contexts(self) }
+    self.0.number_of_detached_contexts_
   }
 
   /// Returns a 0/1 boolean, which signifies whether the V8 overwrite heap
   /// garbage with a bit pattern.
   #[inline(always)]
-  pub fn does_zap_garbage(&self) -> usize {
-    unsafe { v8__HeapStatistics__does_zap_garbage(self) }
+  pub fn does_zap_garbage(&self) -> bool {
+    self.0.does_zap_garbage_
   }
 }
 
-impl Default for HeapStatistics {
-  fn default() -> Self {
-    let mut s = MaybeUninit::<Self>::uninit();
-    unsafe {
-      v8__HeapStatistics__CONSTRUCT(&mut s);
-      s.assume_init()
-    }
+pub struct HeapSpaceStatistics(v8__HeapSpaceStatistics);
+
+impl HeapSpaceStatistics {
+  pub fn space_name(&self) -> &'static CStr {
+    unsafe { CStr::from_ptr(self.0.space_name_) }
+  }
+
+  pub fn space_size(&self) -> usize {
+    self.0.space_size_
+  }
+
+  pub fn space_used_size(&self) -> usize {
+    self.0.space_used_size_
+  }
+
+  pub fn space_available_size(&self) -> usize {
+    self.0.space_available_size_
+  }
+
+  pub fn physical_space_size(&self) -> usize {
+    self.0.physical_space_size_
   }
 }
 
@@ -1877,33 +2160,39 @@ impl RawSlot {
   // caller is correct.
   #[inline]
   pub unsafe fn borrow<T: 'static>(&self) -> &T {
-    if Self::needs_box::<T>() {
-      &*(self.data.as_ptr() as *const Box<T>)
-    } else {
-      &*(self.data.as_ptr() as *const T)
+    unsafe {
+      if Self::needs_box::<T>() {
+        &*(self.data.as_ptr() as *const Box<T>)
+      } else {
+        &*(self.data.as_ptr() as *const T)
+      }
     }
   }
 
   // Safety: see [`RawSlot::borrow`].
   #[inline]
   pub unsafe fn borrow_mut<T: 'static>(&mut self) -> &mut T {
-    if Self::needs_box::<T>() {
-      &mut *(self.data.as_mut_ptr() as *mut Box<T>)
-    } else {
-      &mut *(self.data.as_mut_ptr() as *mut T)
+    unsafe {
+      if Self::needs_box::<T>() {
+        &mut *(self.data.as_mut_ptr() as *mut Box<T>)
+      } else {
+        &mut *(self.data.as_mut_ptr() as *mut T)
+      }
     }
   }
 
   // Safety: see [`RawSlot::borrow`].
   #[inline]
   pub unsafe fn into_inner<T: 'static>(self) -> T {
-    let value = if Self::needs_box::<T>() {
-      *std::ptr::read(self.data.as_ptr() as *mut Box<T>)
-    } else {
-      std::ptr::read(self.data.as_ptr() as *mut T)
-    };
-    forget(self);
-    value
+    unsafe {
+      let value = if Self::needs_box::<T>() {
+        *std::ptr::read(self.data.as_ptr() as *mut Box<T>)
+      } else {
+        std::ptr::read(self.data.as_ptr() as *mut T)
+      };
+      forget(self);
+      value
+    }
   }
 
   const fn needs_box<T: 'static>() -> bool {
@@ -1930,7 +2219,9 @@ impl RawSlot {
   // SAFETY: a valid value of type `T` or `Box<T>` must be stored in the slot.
   unsafe fn drop_internal<B: 'static>(data: &mut RawSlotData) {
     assert!(!Self::needs_box::<B>());
-    drop_in_place(data.as_mut_ptr() as *mut B);
+    unsafe {
+      drop_in_place(data.as_mut_ptr() as *mut B);
+    }
   }
 }
 

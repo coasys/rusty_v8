@@ -88,8 +88,8 @@
 //!   - `P` is `DisallowJavascriptExecutionScope`.
 //!   - Derefs to `HandleScope<'s, ()>`.
 
-use std::alloc::alloc;
 use std::alloc::Layout;
+use std::alloc::alloc;
 use std::any::type_name;
 use std::cell::Cell;
 use std::convert::TryInto;
@@ -102,8 +102,6 @@ use std::ops::DerefMut;
 use std::ptr;
 use std::ptr::NonNull;
 
-use crate::function::FunctionCallbackInfo;
-use crate::function::PropertyCallbackInfo;
 use crate::Context;
 use crate::Data;
 use crate::DataError;
@@ -116,7 +114,11 @@ use crate::Object;
 use crate::OwnedIsolate;
 use crate::Primitive;
 use crate::PromiseRejectMessage;
+use crate::SealedLocal;
 use crate::Value;
+use crate::fast_api::FastApiCallbackOptions;
+use crate::function::FunctionCallbackInfo;
+use crate::function::PropertyCallbackInfo;
 
 /// Stack-allocated class which sets the execution context for all operations
 /// executed within a local scope. After entering a context, all code compiled
@@ -208,6 +210,19 @@ impl<'s> HandleScope<'s> {
       unsafe { raw::v8__Isolate__GetEnteredOrMicrotaskContext(isolate_ptr) };
     unsafe { Local::from_raw(context_ptr) }.unwrap()
   }
+
+  /// Returns the host defined options set for currently running script or
+  /// module, if available.
+  #[inline(always)]
+  pub fn get_current_host_defined_options(&self) -> Option<Local<'s, Data>> {
+    let data = data::ScopeData::get(self);
+    let isolate_ptr = data.get_isolate_ptr();
+    unsafe {
+      Local::from_raw(raw::v8__Isolate__GetCurrentHostDefinedOptions(
+        isolate_ptr,
+      ))
+    }
+  }
 }
 
 impl<'s> HandleScope<'s, ()> {
@@ -236,12 +251,22 @@ impl<'s> HandleScope<'s, ()> {
     &mut self,
     f: impl FnOnce(&mut data::ScopeData) -> *const T,
   ) -> Option<Local<'s, T>> {
-    Local::from_raw(f(data::ScopeData::get_mut(self)))
+    unsafe { Local::from_raw(f(data::ScopeData::get_mut(self))) }
   }
 
   #[inline(always)]
   pub(crate) fn get_isolate_ptr(&self) -> *mut Isolate {
     data::ScopeData::get(self).get_isolate_ptr()
+  }
+
+  /// Open a handle passed from V8 in the current scope.
+  ///
+  /// # Safety
+  ///
+  /// The handle must be rooted in this scope.
+  #[inline(always)]
+  pub unsafe fn unseal<T>(&self, v: SealedLocal<T>) -> Local<'s, T> {
+    unsafe { Local::from_non_null(v.0) }
   }
 }
 
@@ -440,7 +465,7 @@ impl<'s, P: param::NewTryCatch<'s>> TryCatch<'s, P> {
   }
 }
 
-impl<'s, P> TryCatch<'s, P> {
+impl<P> TryCatch<'_, P> {
   /// Returns true if an exception has been caught by this try/catch block.
   #[inline(always)]
   pub fn has_caught(&self) -> bool {
@@ -615,6 +640,7 @@ where
 ///   - `&FunctionCallbackInfo`
 ///   - `&PropertyCallbackInfo`
 ///   - `&PromiseRejectMessage`
+///   - `&FastApiCallbackOptions`
 #[derive(Debug)]
 pub struct CallbackScope<'s, C = Context> {
   _data: NonNull<data::ScopeData>,
@@ -624,10 +650,24 @@ pub struct CallbackScope<'s, C = Context> {
 impl<'s> CallbackScope<'s> {
   #[allow(clippy::new_ret_no_self)]
   pub unsafe fn new<P: param::NewCallbackScope<'s>>(param: P) -> P::NewScope {
-    let (isolate, context) = param.get_isolate_mut_and_maybe_current_context();
-    data::ScopeData::get_current_mut(isolate)
-      .new_callback_scope_data(context)
-      .as_scope()
+    let context = param.get_context();
+    let scope_data =
+      data::ScopeData::get_current_mut(unsafe { param.get_isolate_mut() });
+    // A HandleScope is not implicitly created for
+    // fast functions, so one must be opened here.
+    let scope_data = if P::NEEDS_SCOPE {
+      if let Some(context) = context {
+        scope_data.new_handle_scope_data_with_context(&context)
+      } else {
+        scope_data.new_handle_scope_data()
+      }
+    } else {
+      scope_data.new_callback_scope_data(context)
+    };
+    // This scope needs to exit when dropped, as it
+    // must not live beyond the callback activation.
+    scope_data.disable_zombie();
+    scope_data.as_scope()
   }
 }
 
@@ -973,13 +1013,13 @@ mod param {
     fn get_isolate_mut(&mut self) -> &mut Isolate;
   }
 
-  impl<'s> NewHandleScopeWithContext<'s> for Isolate {
+  impl NewHandleScopeWithContext<'_> for Isolate {
     fn get_isolate_mut(&mut self) -> &mut Isolate {
       self
     }
   }
 
-  impl<'s> NewHandleScopeWithContext<'s> for OwnedIsolate {
+  impl NewHandleScopeWithContext<'_> for OwnedIsolate {
     fn get_isolate_mut(&mut self) -> &mut Isolate {
       &mut *self
     }
@@ -1147,11 +1187,10 @@ mod param {
 
   pub trait NewCallbackScope<'s>: Sized + getter::GetIsolate<'s> {
     type NewScope: Scope;
+    const NEEDS_SCOPE: bool = false;
 
-    unsafe fn get_isolate_mut_and_maybe_current_context(
-      self,
-    ) -> (&'s mut Isolate, Option<Local<'s, Context>>) {
-      (self.get_isolate_mut(), None)
+    fn get_context(&self) -> Option<Local<'s, Context>> {
+      None
     }
   }
 
@@ -1167,17 +1206,20 @@ mod param {
     type NewScope = CallbackScope<'s>;
   }
 
-  impl<'s> NewCallbackScope<'s> for &'s PropertyCallbackInfo {
+  impl<'s, T> NewCallbackScope<'s> for &'s PropertyCallbackInfo<T> {
     type NewScope = CallbackScope<'s>;
+  }
+
+  impl<'s> NewCallbackScope<'s> for &'s FastApiCallbackOptions<'s> {
+    type NewScope = CallbackScope<'s>;
+    const NEEDS_SCOPE: bool = true;
   }
 
   impl<'s> NewCallbackScope<'s> for Local<'s, Context> {
     type NewScope = CallbackScope<'s>;
 
-    unsafe fn get_isolate_mut_and_maybe_current_context(
-      self,
-    ) -> (&'s mut Isolate, Option<Local<'s, Context>>) {
-      (getter::GetIsolate::get_isolate_mut(self), Some(self))
+    fn get_context(&self) -> Option<Local<'s, Context>> {
+      Some(*self)
     }
   }
 
@@ -1218,39 +1260,45 @@ mod getter {
 
   impl<'s> GetIsolate<'s> for &'s FunctionCallbackInfo {
     unsafe fn get_isolate_mut(self) -> &'s mut Isolate {
-      &mut *self.get_isolate_ptr()
+      unsafe { &mut *self.get_isolate_ptr() }
     }
   }
 
-  impl<'s> GetIsolate<'s> for &'s PropertyCallbackInfo {
+  impl<'s, T> GetIsolate<'s> for &'s PropertyCallbackInfo<T> {
     unsafe fn get_isolate_mut(self) -> &'s mut Isolate {
-      &mut *self.get_isolate_ptr()
+      unsafe { &mut *self.get_isolate_ptr() }
+    }
+  }
+
+  impl<'s> GetIsolate<'s> for &'s FastApiCallbackOptions<'s> {
+    unsafe fn get_isolate_mut(self) -> &'s mut Isolate {
+      unsafe { &mut *self.isolate }
     }
   }
 
   impl<'s> GetIsolate<'s> for Local<'s, Context> {
     unsafe fn get_isolate_mut(self) -> &'s mut Isolate {
-      &mut *raw::v8__Context__GetIsolate(&*self)
+      unsafe { &mut *raw::v8__Context__GetIsolate(&*self) }
     }
   }
 
   impl<'s> GetIsolate<'s> for Local<'s, Message> {
     unsafe fn get_isolate_mut(self) -> &'s mut Isolate {
-      &mut *raw::v8__Message__GetIsolate(&*self)
+      unsafe { &mut *raw::v8__Message__GetIsolate(&*self) }
     }
   }
 
   impl<'s, T: Into<Local<'s, Object>>> GetIsolate<'s> for T {
     unsafe fn get_isolate_mut(self) -> &'s mut Isolate {
       let object: Local<Object> = self.into();
-      &mut *raw::v8__Object__GetIsolate(&*object)
+      unsafe { &mut *raw::v8__Object__GetIsolate(&*object) }
     }
   }
 
   impl<'s> GetIsolate<'s> for &'s PromiseRejectMessage<'s> {
     unsafe fn get_isolate_mut(self) -> &'s mut Isolate {
       let object: Local<Object> = self.get_promise().into();
-      &mut *raw::v8__Object__GetIsolate(&*object)
+      unsafe { &mut *raw::v8__Object__GetIsolate(&*object) }
     }
   }
 
@@ -1392,6 +1440,7 @@ pub(crate) mod data {
         let isolate = data.isolate;
         data.scope_type_specific_data.init_with(|| {
           ScopeTypeSpecificData::HandleScope {
+            allow_zombie: true,
             raw_handle_scope: unsafe { raw::HandleScope::uninit() },
             raw_context_scope: None,
           }
@@ -1400,6 +1449,7 @@ pub(crate) mod data {
           ScopeTypeSpecificData::HandleScope {
             raw_handle_scope,
             raw_context_scope,
+            ..
           } => {
             unsafe { raw_handle_scope.init(isolate) };
             init_context_fn(isolate, &mut data.context, raw_context_scope);
@@ -1410,9 +1460,18 @@ pub(crate) mod data {
     }
 
     #[inline(always)]
+    pub(super) fn disable_zombie(&mut self) {
+      if let ScopeTypeSpecificData::HandleScope { allow_zombie, .. } =
+        &mut self.scope_type_specific_data
+      {
+        *allow_zombie = false;
+      }
+    }
+
+    #[inline(always)]
     pub(super) fn new_handle_scope_data(&mut self) -> &mut Self {
       self.new_handle_scope_data_with(|_, _, raw_context_scope| {
-        debug_assert!(raw_context_scope.is_none())
+        debug_assert!(raw_context_scope.is_none());
       })
     }
 
@@ -1719,7 +1778,9 @@ pub(crate) mod data {
     #[inline(always)]
     pub(super) fn notify_scope_dropped(&mut self) {
       match &self.scope_type_specific_data {
-        ScopeTypeSpecificData::HandleScope { .. }
+        ScopeTypeSpecificData::HandleScope {
+          allow_zombie: true, ..
+        }
         | ScopeTypeSpecificData::EscapableHandleScope { .. } => {
           // Defer scope exit until the parent scope is touched.
           self.status.set(match self.status.get() {
@@ -1727,7 +1788,7 @@ pub(crate) mod data {
               ScopeStatus::Current { zombie: true }
             }
             _ => unreachable!(),
-          })
+          });
         }
         _ => {
           // Regular, immediate exit.
@@ -1851,6 +1912,7 @@ pub(crate) mod data {
       _raw_context_scope: raw::ContextScope,
     },
     HandleScope {
+      allow_zombie: bool,
       raw_handle_scope: raw::HandleScope,
       raw_context_scope: Option<raw::ContextScope>,
     },
@@ -1887,7 +1949,7 @@ pub(crate) mod data {
         raw_context_scope, ..
       } = self
       {
-        *raw_context_scope = None
+        *raw_context_scope = None;
       }
     }
   }
@@ -1950,7 +2012,7 @@ mod raw {
     /// This function is marked unsafe because the caller must ensure that the
     /// returned value isn't dropped before `init()` has been called.
     pub unsafe fn uninit() -> Self {
-      Self(MaybeUninit::uninit().assume_init())
+      Self(unsafe { MaybeUninit::uninit().assume_init() })
     }
 
     /// This function is marked unsafe because `init()` must be called exactly
@@ -1958,7 +2020,9 @@ mod raw {
     /// `HandleScope::uninit()`.
     pub unsafe fn init(&mut self, isolate: NonNull<Isolate>) {
       let buf = NonNull::from(self).cast();
-      v8__HandleScope__CONSTRUCT(buf.as_ptr(), isolate.as_ptr());
+      unsafe {
+        v8__HandleScope__CONSTRUCT(buf.as_ptr(), isolate.as_ptr());
+      }
     }
   }
 
@@ -2009,7 +2073,7 @@ mod raw {
     /// This function is marked unsafe because the caller must ensure that the
     /// returned value isn't dropped before `init()` has been called.
     pub unsafe fn uninit() -> Self {
-      Self(MaybeUninit::uninit().assume_init())
+      Self(unsafe { MaybeUninit::uninit().assume_init() })
     }
 
     /// This function is marked unsafe because `init()` must be called exactly
@@ -2017,7 +2081,9 @@ mod raw {
     /// `TryCatch::uninit()`.
     pub unsafe fn init(&mut self, isolate: NonNull<Isolate>) {
       let buf = NonNull::from(self).cast();
-      v8__TryCatch__CONSTRUCT(buf.as_ptr(), isolate.as_ptr());
+      unsafe {
+        v8__TryCatch__CONSTRUCT(buf.as_ptr(), isolate.as_ptr());
+      }
     }
   }
 
@@ -2038,7 +2104,7 @@ mod raw {
     /// This function is marked unsafe because the caller must ensure that the
     /// returned value isn't dropped before `init()` has been called.
     pub unsafe fn uninit() -> Self {
-      Self(MaybeUninit::uninit().assume_init())
+      Self(unsafe { MaybeUninit::uninit().assume_init() })
     }
 
     /// This function is marked unsafe because `init()` must be called exactly
@@ -2051,11 +2117,13 @@ mod raw {
       on_failure: OnFailure,
     ) {
       let buf = NonNull::from(self).cast();
-      v8__DisallowJavascriptExecutionScope__CONSTRUCT(
-        buf.as_ptr(),
-        isolate.as_ptr(),
-        on_failure,
-      );
+      unsafe {
+        v8__DisallowJavascriptExecutionScope__CONSTRUCT(
+          buf.as_ptr(),
+          isolate.as_ptr(),
+          on_failure,
+        );
+      }
     }
   }
 
@@ -2076,7 +2144,7 @@ mod raw {
     /// This function is marked unsafe because the caller must ensure that the
     /// returned value isn't dropped before `init()` has been called.
     pub unsafe fn uninit() -> Self {
-      Self(MaybeUninit::uninit().assume_init())
+      Self(unsafe { MaybeUninit::uninit().assume_init() })
     }
 
     /// This function is marked unsafe because `init()` must be called exactly
@@ -2084,11 +2152,13 @@ mod raw {
     /// `AllowJavascriptExecutionScope` value with
     /// `AllowJavascriptExecutionScope::uninit()`.
     pub unsafe fn init(&mut self, isolate: NonNull<Isolate>) {
-      let buf = NonNull::from(self).cast();
-      v8__AllowJavascriptExecutionScope__CONSTRUCT(
-        buf.as_ptr(),
-        isolate.as_ptr(),
-      );
+      unsafe {
+        let buf = NonNull::from(self).cast();
+        v8__AllowJavascriptExecutionScope__CONSTRUCT(
+          buf.as_ptr(),
+          isolate.as_ptr(),
+        );
+      }
     }
   }
 
@@ -2099,7 +2169,7 @@ mod raw {
     }
   }
 
-  extern "C" {
+  unsafe extern "C" {
     pub(super) fn v8__Isolate__GetCurrentContext(
       isolate: *mut Isolate,
     ) -> *const Context;
@@ -2114,6 +2184,9 @@ mod raw {
       this: *mut Isolate,
       index: usize,
     ) -> *const Data;
+    pub(super) fn v8__Isolate__GetCurrentHostDefinedOptions(
+      this: *mut Isolate,
+    ) -> *const Data;
 
     pub(super) fn v8__Context__EQ(
       this: *const Context,
@@ -2122,7 +2195,7 @@ mod raw {
     pub(super) fn v8__Context__Enter(this: *const Context);
     pub(super) fn v8__Context__Exit(this: *const Context);
     pub(super) fn v8__Context__GetIsolate(this: *const Context)
-      -> *mut Isolate;
+    -> *mut Isolate;
     pub(super) fn v8__Context__GetDataFromSnapshotOnce(
       this: *const Context,
       index: usize,
@@ -2199,7 +2272,7 @@ mod raw {
     );
 
     pub(super) fn v8__Message__GetIsolate(this: *const Message)
-      -> *mut Isolate;
+    -> *mut Isolate;
     pub(super) fn v8__Object__GetIsolate(this: *const Object) -> *mut Isolate;
   }
 }
@@ -2207,11 +2280,9 @@ mod raw {
 #[cfg(test)]
 mod tests {
   use super::*;
-  use crate::new_default_platform;
+  use crate::ContextOptions;
   use crate::Global;
-  use crate::V8;
   use std::any::type_name;
-  use std::sync::Once;
 
   trait SameType {}
   impl<A> SameType for (A, A) {}
@@ -2221,7 +2292,7 @@ mod tests {
   /// latter allows coercions and dereferencing to change the type, whereas
   /// `AssertTypeOf` requires the compared types to match exactly.
   struct AssertTypeOf<'a, T>(#[allow(dead_code)] &'a T);
-  impl<'a, T> AssertTypeOf<'a, T> {
+  impl<T> AssertTypeOf<'_, T> {
     pub fn is<A>(self)
     where
       (A, T): SameType,
@@ -2230,22 +2301,14 @@ mod tests {
     }
   }
 
-  fn initialize_v8() {
-    static INIT: Once = Once::new();
-    INIT.call_once(|| {
-      V8::initialize_platform(new_default_platform(0, false).make_shared());
-      V8::initialize();
-    });
-  }
-
   #[test]
   fn deref_types() {
-    initialize_v8();
+    crate::initialize_v8();
     let isolate = &mut Isolate::new(Default::default());
     AssertTypeOf(isolate).is::<OwnedIsolate>();
     let l1_hs = &mut HandleScope::new(isolate);
     AssertTypeOf(l1_hs).is::<HandleScope<()>>();
-    let context = Context::new(l1_hs);
+    let context = Context::new(l1_hs, ContextOptions::default());
     {
       let l2_cxs = &mut ContextScope::new(l1_hs, context);
       AssertTypeOf(l2_cxs).is::<ContextScope<HandleScope>>();
@@ -2414,14 +2477,14 @@ mod tests {
 
   #[test]
   fn new_scope_types() {
-    initialize_v8();
+    crate::initialize_v8();
     let isolate = &mut Isolate::new(Default::default());
     AssertTypeOf(isolate).is::<OwnedIsolate>();
     let global_context: Global<Context>;
     {
       let l1_hs = &mut HandleScope::new(isolate);
       AssertTypeOf(l1_hs).is::<HandleScope<()>>();
-      let context = Context::new(l1_hs);
+      let context = Context::new(l1_hs, Default::default());
       global_context = Global::new(l1_hs, context);
       AssertTypeOf(&HandleScope::new(l1_hs)).is::<HandleScope<()>>();
       {
@@ -2525,7 +2588,7 @@ mod tests {
     {
       let l1_cbs = &mut unsafe { CallbackScope::new(&mut *isolate) };
       AssertTypeOf(l1_cbs).is::<CallbackScope<()>>();
-      let context = Context::new(l1_cbs);
+      let context = Context::new(l1_cbs, Default::default());
       AssertTypeOf(&ContextScope::new(l1_cbs, context))
         .is::<ContextScope<HandleScope>>();
       AssertTypeOf(&HandleScope::new(l1_cbs)).is::<HandleScope<()>>();

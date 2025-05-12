@@ -13,21 +13,21 @@
 //! https://github.com/nodejs/node/tree/v13.7.0/src/inspector
 //! https://github.com/denoland/deno/blob/v0.38.0/cli/inspector.rs
 
-use crate::support::int;
+use crate::Context;
+use crate::Isolate;
+use crate::Local;
+use crate::StackTrace;
+use crate::Value;
 use crate::support::CxxVTable;
 use crate::support::FieldOffset;
 use crate::support::Opaque;
 use crate::support::RustVTable;
 use crate::support::UniquePtr;
 use crate::support::UniqueRef;
-use crate::Context;
-use crate::Isolate;
-use crate::Local;
-use crate::StackTrace;
-use crate::Value;
+use crate::support::int;
 use std::fmt::{self, Debug, Formatter};
 
-extern "C" {
+unsafe extern "C" {
   fn v8_inspector__V8Inspector__Channel__BASE__CONSTRUCT(
     buf: &mut std::mem::MaybeUninit<Channel>,
   );
@@ -136,64 +136,76 @@ extern "C" {
   fn v8_inspector__V8StackTrace__DELETE(this: *mut V8StackTrace);
 }
 
-#[no_mangle]
-pub unsafe extern "C" fn v8_inspector__V8Inspector__Channel__BASE__sendResponse(
+#[unsafe(no_mangle)]
+unsafe extern "C" fn v8_inspector__V8Inspector__Channel__BASE__sendResponse(
   this: &mut Channel,
   call_id: int,
   message: UniquePtr<StringBuffer>,
 ) {
-  ChannelBase::dispatch_mut(this).send_response(call_id, message)
+  unsafe {
+    ChannelBase::dispatch_mut(this).send_response(call_id, message);
+  }
 }
 
-#[no_mangle]
-pub unsafe extern "C" fn v8_inspector__V8Inspector__Channel__BASE__sendNotification(
+#[unsafe(no_mangle)]
+unsafe extern "C" fn v8_inspector__V8Inspector__Channel__BASE__sendNotification(
   this: &mut Channel,
   message: UniquePtr<StringBuffer>,
 ) {
-  ChannelBase::dispatch_mut(this).send_notification(message)
+  unsafe {
+    ChannelBase::dispatch_mut(this).send_notification(message);
+  }
 }
 
-#[no_mangle]
-pub unsafe extern "C" fn v8_inspector__V8Inspector__Channel__BASE__flushProtocolNotifications(
+#[unsafe(no_mangle)]
+unsafe extern "C" fn v8_inspector__V8Inspector__Channel__BASE__flushProtocolNotifications(
   this: &mut Channel,
 ) {
-  ChannelBase::dispatch_mut(this).flush_protocol_notifications()
+  unsafe {
+    ChannelBase::dispatch_mut(this).flush_protocol_notifications();
+  }
 }
 
-#[no_mangle]
-pub unsafe extern "C" fn v8_inspector__V8InspectorClient__BASE__generateUniqueId(
+#[unsafe(no_mangle)]
+unsafe extern "C" fn v8_inspector__V8InspectorClient__BASE__generateUniqueId(
   this: &mut V8InspectorClient,
 ) -> i64 {
-  V8InspectorClientBase::dispatch_mut(this).generate_unique_id()
+  unsafe { V8InspectorClientBase::dispatch_mut(this).generate_unique_id() }
 }
 
-#[no_mangle]
-pub unsafe extern "C" fn v8_inspector__V8InspectorClient__BASE__runMessageLoopOnPause(
+#[unsafe(no_mangle)]
+unsafe extern "C" fn v8_inspector__V8InspectorClient__BASE__runMessageLoopOnPause(
   this: &mut V8InspectorClient,
   context_group_id: int,
 ) {
-  V8InspectorClientBase::dispatch_mut(this)
-    .run_message_loop_on_pause(context_group_id)
+  unsafe {
+    V8InspectorClientBase::dispatch_mut(this)
+      .run_message_loop_on_pause(context_group_id);
+  }
 }
 
-#[no_mangle]
-pub unsafe extern "C" fn v8_inspector__V8InspectorClient__BASE__quitMessageLoopOnPause(
+#[unsafe(no_mangle)]
+unsafe extern "C" fn v8_inspector__V8InspectorClient__BASE__quitMessageLoopOnPause(
   this: &mut V8InspectorClient,
 ) {
-  V8InspectorClientBase::dispatch_mut(this).quit_message_loop_on_pause()
+  unsafe {
+    V8InspectorClientBase::dispatch_mut(this).quit_message_loop_on_pause();
+  }
 }
 
-#[no_mangle]
-pub unsafe extern "C" fn v8_inspector__V8InspectorClient__BASE__runIfWaitingForDebugger(
+#[unsafe(no_mangle)]
+unsafe extern "C" fn v8_inspector__V8InspectorClient__BASE__runIfWaitingForDebugger(
   this: &mut V8InspectorClient,
   context_group_id: int,
 ) {
-  V8InspectorClientBase::dispatch_mut(this)
-    .run_if_waiting_for_debugger(context_group_id)
+  unsafe {
+    V8InspectorClientBase::dispatch_mut(this)
+      .run_if_waiting_for_debugger(context_group_id);
+  }
 }
 
-#[no_mangle]
-pub unsafe extern "C" fn v8_inspector__V8InspectorClient__BASE__consoleAPIMessage(
+#[unsafe(no_mangle)]
+unsafe extern "C" fn v8_inspector__V8InspectorClient__BASE__consoleAPIMessage(
   this: &mut V8InspectorClient,
   context_group_id: int,
   level: int,
@@ -203,15 +215,46 @@ pub unsafe extern "C" fn v8_inspector__V8InspectorClient__BASE__consoleAPIMessag
   column_number: u32,
   stack_trace: &mut V8StackTrace,
 ) {
-  V8InspectorClientBase::dispatch_mut(this).console_api_message(
-    context_group_id,
-    level,
-    message,
-    url,
-    line_number,
-    column_number,
-    stack_trace,
-  )
+  unsafe {
+    V8InspectorClientBase::dispatch_mut(this).console_api_message(
+      context_group_id,
+      level,
+      message,
+      url,
+      line_number,
+      column_number,
+      stack_trace,
+    );
+  }
+}
+
+#[unsafe(no_mangle)]
+unsafe extern "C" fn v8_inspector__V8InspectorClient__BASE__ensureDefaultContextInGroup(
+  this: &mut V8InspectorClient,
+  context_group_id: int,
+) -> *const Context {
+  unsafe {
+    match V8InspectorClientBase::dispatch_mut(this)
+      .ensure_default_context_in_group(context_group_id)
+    {
+      Some(h) => &*h,
+      None => std::ptr::null_mut(),
+    }
+  }
+}
+
+#[unsafe(no_mangle)]
+unsafe extern "C" fn v8_inspector__V8InspectorClient__BASE__resourceNameToUrl(
+  this: &mut V8InspectorClient,
+  resource_name: &StringView,
+) -> *mut StringBuffer {
+  unsafe {
+    V8InspectorClientBase::dispatch_mut(this)
+      .resource_name_to_url(resource_name)
+      .and_then(|mut v| v.take())
+      .map(|r| r.into_raw())
+      .unwrap_or(std::ptr::null_mut())
+  }
 }
 
 #[repr(C)]
@@ -227,17 +270,17 @@ impl Channel {
     message: UniquePtr<StringBuffer>,
   ) {
     unsafe {
-      v8_inspector__V8Inspector__Channel__sendResponse(self, call_id, message)
+      v8_inspector__V8Inspector__Channel__sendResponse(self, call_id, message);
     }
   }
   pub fn send_notification(&mut self, message: UniquePtr<StringBuffer>) {
     unsafe {
-      v8_inspector__V8Inspector__Channel__sendNotification(self, message)
+      v8_inspector__V8Inspector__Channel__sendNotification(self, message);
     }
   }
   pub fn flush_protocol_notifications(&mut self) {
     unsafe {
-      v8_inspector__V8Inspector__Channel__flushProtocolNotifications(self)
+      v8_inspector__V8Inspector__Channel__flushProtocolNotifications(self);
     }
   }
 }
@@ -337,16 +380,21 @@ impl ChannelBase {
   }
 
   pub unsafe fn dispatch(channel: &Channel) -> &dyn ChannelImpl {
-    let this = Self::get_cxx_base_offset().to_embedder::<Self>(channel);
-    let embedder = this.offset_within_embedder.to_embedder::<Opaque>(this);
-    std::mem::transmute((embedder, this.rust_vtable))
+    unsafe {
+      let this = Self::get_cxx_base_offset().to_embedder::<Self>(channel);
+      let embedder = this.offset_within_embedder.to_embedder::<Opaque>(this);
+      std::mem::transmute((embedder, this.rust_vtable))
+    }
   }
 
   pub unsafe fn dispatch_mut(channel: &mut Channel) -> &mut dyn ChannelImpl {
-    let this = Self::get_cxx_base_offset().to_embedder_mut::<Self>(channel);
-    let vtable = this.rust_vtable;
-    let embedder = this.offset_within_embedder.to_embedder_mut::<Opaque>(this);
-    std::mem::transmute((embedder, vtable))
+    unsafe {
+      let this = Self::get_cxx_base_offset().to_embedder_mut::<Self>(channel);
+      let vtable = this.rust_vtable;
+      let embedder =
+        this.offset_within_embedder.to_embedder_mut::<Opaque>(this);
+      std::mem::transmute((embedder, vtable))
+    }
   }
 }
 
@@ -406,7 +454,7 @@ mod tests {
       self.log_call();
     }
     fn flush_protocol_notifications(&mut self) {
-      self.log_call()
+      self.log_call();
     }
   }
 
@@ -451,7 +499,7 @@ impl V8InspectorClient {
       v8_inspector__V8InspectorClient__runMessageLoopOnPause(
         self,
         context_group_id,
-      )
+      );
     }
   }
 
@@ -464,7 +512,7 @@ impl V8InspectorClient {
       v8_inspector__V8InspectorClient__runIfWaitingForDebugger(
         self,
         context_group_id,
-      )
+      );
     }
   }
 
@@ -489,7 +537,7 @@ impl V8InspectorClient {
         line_number,
         column_number,
         stack_trace,
-      )
+      );
     }
   }
 
@@ -553,6 +601,20 @@ pub trait V8InspectorClientImpl: AsV8InspectorClient {
     stack_trace: &mut V8StackTrace,
   ) {
   }
+
+  fn ensure_default_context_in_group(
+    &mut self,
+    context_group_id: i32,
+  ) -> Option<Local<Context>> {
+    None
+  }
+
+  fn resource_name_to_url(
+    &mut self,
+    resource_name: &StringView,
+  ) -> Option<UniquePtr<StringBuffer>> {
+    None
+  }
 }
 
 pub struct V8InspectorClientBase {
@@ -613,18 +675,23 @@ impl V8InspectorClientBase {
   pub unsafe fn dispatch(
     client: &V8InspectorClient,
   ) -> &dyn V8InspectorClientImpl {
-    let this = Self::get_cxx_base_offset().to_embedder::<Self>(client);
-    let embedder = this.offset_within_embedder.to_embedder::<Opaque>(this);
-    std::mem::transmute((embedder, this.rust_vtable))
+    unsafe {
+      let this = Self::get_cxx_base_offset().to_embedder::<Self>(client);
+      let embedder = this.offset_within_embedder.to_embedder::<Opaque>(this);
+      std::mem::transmute((embedder, this.rust_vtable))
+    }
   }
 
   pub unsafe fn dispatch_mut(
     client: &mut V8InspectorClient,
   ) -> &mut dyn V8InspectorClientImpl {
-    let this = Self::get_cxx_base_offset().to_embedder_mut::<Self>(client);
-    let vtable = this.rust_vtable;
-    let embedder = this.offset_within_embedder.to_embedder_mut::<Opaque>(this);
-    std::mem::transmute((embedder, vtable))
+    unsafe {
+      let this = Self::get_cxx_base_offset().to_embedder_mut::<Self>(client);
+      let vtable = this.rust_vtable;
+      let embedder =
+        this.offset_within_embedder.to_embedder_mut::<Opaque>(this);
+      std::mem::transmute((embedder, vtable))
+    }
   }
 }
 
@@ -648,7 +715,7 @@ impl V8InspectorSession {
 
   pub fn dispatch_protocol_message(&mut self, message: StringView) {
     unsafe {
-      v8_inspector__V8InspectorSession__dispatchProtocolMessage(self, message)
+      v8_inspector__V8InspectorSession__dispatchProtocolMessage(self, message);
     }
   }
 
@@ -660,7 +727,7 @@ impl V8InspectorSession {
     unsafe {
       v8_inspector__V8InspectorSession__schedulePauseOnNextStatement(
         self, reason, detail,
-      )
+      );
     }
   }
 }
@@ -709,9 +776,9 @@ use std::iter::ExactSizeIterator;
 use std::iter::IntoIterator;
 use std::marker::PhantomData;
 use std::ops::Deref;
+use std::ptr::NonNull;
 use std::ptr::addr_of;
 use std::ptr::null;
-use std::ptr::NonNull;
 use std::slice;
 use std::string;
 
@@ -738,8 +805,8 @@ impl StringView<'static> {
 impl fmt::Display for StringView<'_> {
   fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
     match self {
-      Self::U16(v) => write!(f, "{}", v),
-      Self::U8(v) => write!(f, "{}", v),
+      Self::U16(v) => write!(f, "{v}"),
+      Self::U8(v) => write!(f, "{v}"),
     }
   }
 }
@@ -756,7 +823,7 @@ impl<'a> From<&'a [u16]> for StringView<'a> {
   }
 }
 
-impl<'a> StringView<'a> {
+impl StringView<'_> {
   pub fn is_8bit(&self) -> bool {
     match self {
       Self::U16(..) => false,
@@ -817,7 +884,7 @@ impl CharacterArray<'static, u8> {
   }
 }
 
-impl<'a, T> CharacterArray<'a, T>
+impl<T> CharacterArray<'_, T>
 where
   T: Copy,
 {
@@ -836,8 +903,8 @@ where
   }
 }
 
-unsafe impl<'a, T> Send for CharacterArray<'a, T> where T: Copy {}
-unsafe impl<'a, T> Sync for CharacterArray<'a, T> where T: Sync {}
+unsafe impl<T> Send for CharacterArray<'_, T> where T: Copy {}
+unsafe impl<T> Sync for CharacterArray<'_, T> where T: Sync {}
 
 impl fmt::Display for CharacterArray<'_, u8> {
   fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
@@ -868,7 +935,7 @@ impl<'a, T> From<&'a [T]> for CharacterArray<'a, T> {
   }
 }
 
-impl<'a, T> Deref for CharacterArray<'a, T> {
+impl<T> Deref for CharacterArray<'_, T> {
   type Target = [T];
 
   fn deref(&self) -> &[T] {
@@ -879,7 +946,7 @@ impl<'a, T> Deref for CharacterArray<'a, T> {
     } = *self;
     if m_characters.is_null() {
       assert_eq!(m_length, 0);
-      m_characters = NonNull::dangling().as_ptr()
+      m_characters = NonNull::dangling().as_ptr();
     };
     unsafe { slice::from_raw_parts(m_characters, m_length) }
   }
@@ -891,7 +958,7 @@ pub struct StringViewIterator<'a> {
   pos: usize,
 }
 
-impl<'a> Iterator for StringViewIterator<'a> {
+impl Iterator for StringViewIterator<'_> {
   type Item = u16;
 
   fn next(&mut self) -> Option<Self::Item> {
@@ -904,7 +971,7 @@ impl<'a> Iterator for StringViewIterator<'a> {
   }
 }
 
-impl<'a> ExactSizeIterator for StringViewIterator<'a> {
+impl ExactSizeIterator for StringViewIterator<'_> {
   fn len(&self) -> usize {
     self.view.len()
   }
@@ -982,7 +1049,7 @@ impl V8Inspector {
         context_group_id,
         human_readable_name,
         aux_data,
-      )
+      );
     }
   }
 
@@ -1021,12 +1088,12 @@ impl V8Inspector {
 
   pub fn create_stack_trace(
     &mut self,
-    stack_trace: Local<StackTrace>,
+    stack_trace: Option<Local<StackTrace>>,
   ) -> UniquePtr<V8StackTrace> {
     unsafe {
       UniquePtr::from_raw(v8_inspector__V8Inspector__createStackTrace(
         self,
-        &*stack_trace,
+        stack_trace.map_or(null(), |v| &*v),
       ))
     }
   }

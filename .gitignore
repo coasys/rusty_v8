@@ -1,9 +1,12 @@
 **/*.rs.bk
 **/*.orig
 
+.envrc
+
 /.vscode/
 /.idea/
 /target/
+/.cipd/
 
 third_party/android_ndk
 third_party/android_platform

@@ -1,18 +1,18 @@
 // Copyright 2019-2021 the Deno authors. All rights reserved. MIT license.
 
-use crate::function::FunctionCallbackArguments;
-use crate::function::FunctionCallbackInfo;
-use crate::scope::CallbackScope;
-use crate::scope::HandleScope;
-use crate::support::char;
-use crate::support::Opaque;
-use crate::support::UnitType;
 use crate::ArrayBuffer;
 use crate::Isolate;
 use crate::Local;
 use crate::Value;
 use crate::WasmMemoryObject;
 use crate::WasmModuleObject;
+use crate::function::FunctionCallbackArguments;
+use crate::function::FunctionCallbackInfo;
+use crate::scope::CallbackScope;
+use crate::scope::HandleScope;
+use crate::support::Opaque;
+use crate::support::UnitType;
+use crate::support::char;
 use std::ptr::null;
 use std::ptr::null_mut;
 
@@ -41,7 +41,11 @@ impl WasmStreaming {
   #[inline(always)]
   pub fn on_bytes_received(&mut self, data: &[u8]) {
     unsafe {
-      v8__WasmStreaming__OnBytesReceived(&mut self.0, data.as_ptr(), data.len())
+      v8__WasmStreaming__OnBytesReceived(
+        &mut self.0,
+        data.as_ptr(),
+        data.len(),
+      );
     }
   }
 
@@ -59,7 +63,7 @@ impl WasmStreaming {
   /// {exception} does not have value, the promise does not get rejected.
   #[inline(always)]
   pub fn abort(mut self, exception: Option<Local<Value>>) {
-    let exception = exception.map(|v| &*v as *const Value).unwrap_or(null());
+    let exception = exception.map_or(null(), |v| &*v as *const Value);
     unsafe { v8__WasmStreaming__Abort(&mut self.0, exception) }
   }
 
@@ -69,13 +73,13 @@ impl WasmStreaming {
   pub fn set_url(&mut self, url: &str) {
     // Although not documented, V8 requires the url to be null terminated.
     // See https://chromium-review.googlesource.com/c/v8/v8/+/3289148.
-    let null_terminated_url = format!("{}\0", url);
+    let null_terminated_url = format!("{url}\0");
     unsafe {
       v8__WasmStreaming__SetUrl(
         &mut self.0,
         null_terminated_url.as_ptr() as *const char,
         url.len(),
-      )
+      );
     }
   }
 }
@@ -183,11 +187,12 @@ impl WasmMemoryObject {
   }
 }
 
-pub(crate) fn trampoline<F>() -> extern "C" fn(*const FunctionCallbackInfo)
+pub(crate) fn trampoline<F>()
+-> unsafe extern "C" fn(*const FunctionCallbackInfo)
 where
   F: UnitType + Fn(&mut HandleScope, Local<Value>, WasmStreaming),
 {
-  extern "C" fn c_fn<F>(info: *const FunctionCallbackInfo)
+  unsafe extern "C" fn c_fn<F>(info: *const FunctionCallbackInfo)
   where
     F: UnitType + Fn(&mut HandleScope, Local<Value>, WasmStreaming),
   {
@@ -198,7 +203,7 @@ where
     let zero = null_mut();
     let mut that = WasmStreamingSharedPtr([zero, zero]);
     unsafe {
-      v8__WasmStreaming__Unpack(scope.get_isolate_ptr(), &*data, &mut that)
+      v8__WasmStreaming__Unpack(scope.get_isolate_ptr(), &*data, &mut that);
     };
     let source = args.get(0);
     (F::get())(scope, source, WasmStreaming(that));
@@ -206,7 +211,7 @@ where
   c_fn::<F>
 }
 
-extern "C" {
+unsafe extern "C" {
   fn v8__WasmStreaming__Unpack(
     isolate: *mut Isolate,
     value: *const Value,

@@ -1,26 +1,21 @@
 use std::any::type_name;
-use std::any::Any;
 use std::borrow::Borrow;
 use std::borrow::BorrowMut;
-use std::convert::identity;
 use std::convert::AsMut;
 use std::convert::AsRef;
 use std::convert::TryFrom;
-use std::fmt::{self, Debug, Formatter};
+use std::fmt::Debug;
 use std::marker::PhantomData;
 use std::mem::align_of;
 use std::mem::forget;
 use std::mem::needs_drop;
 use std::mem::size_of;
 use std::mem::take;
-use std::mem::transmute_copy;
 use std::ops::Deref;
 use std::ops::DerefMut;
+use std::ptr::NonNull;
 use std::ptr::drop_in_place;
 use std::ptr::null_mut;
-use std::ptr::NonNull;
-use std::rc::Rc;
-use std::sync::Arc;
 use std::thread::yield_now;
 use std::time::Duration;
 use std::time::Instant;
@@ -71,14 +66,13 @@ impl<T: ?Sized> UniquePtr<T> {
 impl<T> UniquePtr<T> {
   pub unsafe fn from_raw(ptr: *mut T) -> Self {
     assert_unique_ptr_layout_compatible::<Self, T>();
-    Self(UniqueRef::try_from_raw(ptr))
+    Self(unsafe { UniqueRef::try_from_raw(ptr) })
   }
 
   pub fn into_raw(self) -> *mut T {
     self
       .0
-      .map(|unique_ref| unique_ref.into_raw())
-      .unwrap_or_else(null_mut)
+      .map_or_else(null_mut, |unique_ref| unique_ref.into_raw())
   }
 }
 
@@ -115,7 +109,7 @@ impl<T> UniqueRef<T> {
 
   pub(crate) unsafe fn from_raw(ptr: *mut T) -> Self {
     assert_unique_ptr_layout_compatible::<Self, T>();
-    Self::try_from_raw(ptr).unwrap()
+    unsafe { Self::try_from_raw(ptr).unwrap() }
   }
 
   pub fn into_raw(self) -> *mut T {
@@ -360,113 +354,11 @@ fn assert_shared_ptr_use_count_eq<T: Shared>(
   };
   assert!(
     ok,
-    "assertion failed: `{}<{}>` reference count does not match expectation\
-       \n   actual: {}\
-       \n expected: {}",
-    wrapper_type_name,
+    "assertion failed: `{wrapper_type_name}<{}>` reference count does not match expectation\
+       \n   actual: {actual}\
+       \n expected: {expected}",
     type_name::<T>(),
-    actual,
-    expected
   );
-}
-
-/// A trait for values with static lifetimes that are allocated at a fixed
-/// address in memory. Practically speaking, that means they're either a
-/// `&'static` reference, or they're heap-allocated in a `Arc`, `Box`, `Rc`,
-/// `UniqueRef`, `SharedRef` or `Vec`.
-pub trait Allocated<T: ?Sized>:
-  Deref<Target = T> + Borrow<T> + 'static
-{
-}
-impl<A, T: ?Sized> Allocated<T> for A where
-  A: Deref<Target = T> + Borrow<T> + 'static
-{
-}
-
-pub(crate) enum Allocation<T: ?Sized + 'static> {
-  Static(&'static T),
-  Arc(Arc<T>),
-  Box(Box<T>),
-  Rc(Rc<T>),
-  UniqueRef(UniqueRef<T>),
-  Other(Box<dyn Borrow<T> + 'static>),
-  // Note: it would be nice to add `SharedRef` to this list, but it
-  // requires the `T: Shared` bound, and it's unfortunately not possible
-  // to set bounds on individual enum variants.
-}
-
-impl<T: ?Sized + 'static> Allocation<T> {
-  unsafe fn transmute_wrap<Abstract, Concrete>(
-    value: Abstract,
-    wrap: fn(Concrete) -> Self,
-  ) -> Self {
-    assert_eq!(size_of::<Abstract>(), size_of::<Concrete>());
-    let wrapped = wrap(transmute_copy(&value));
-    forget(value);
-    wrapped
-  }
-
-  fn try_wrap<Abstract: 'static, Concrete: 'static>(
-    value: Abstract,
-    wrap: fn(Concrete) -> Self,
-  ) -> Result<Self, Abstract> {
-    if <dyn Any>::is::<Concrete>(&value) {
-      Ok(unsafe { Self::transmute_wrap(value, wrap) })
-    } else {
-      Err(value)
-    }
-  }
-
-  pub fn of<Abstract: Deref<Target = T> + Borrow<T> + 'static>(
-    a: Abstract,
-  ) -> Self {
-    Self::try_wrap(a, identity)
-      .or_else(|a| Self::try_wrap(a, Self::Static))
-      .or_else(|a| Self::try_wrap(a, Self::Arc))
-      .or_else(|a| Self::try_wrap(a, Self::Box))
-      .or_else(|a| Self::try_wrap(a, Self::Rc))
-      .or_else(|a| Self::try_wrap(a, Self::UniqueRef))
-      .unwrap_or_else(|a| Self::Other(Box::from(a)))
-  }
-}
-
-impl<T: Debug + ?Sized> Debug for Allocation<T> {
-  fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-    match self {
-      Allocation::Arc(r) => f.debug_tuple("Arc").field(&r).finish(),
-      Allocation::Box(b) => f.debug_tuple("Box").field(&b).finish(),
-      Allocation::Other(_) => f.debug_tuple("Other").finish(),
-      Allocation::Rc(r) => f.debug_tuple("Rc").field(&r).finish(),
-      Allocation::Static(s) => f.debug_tuple("Static").field(&s).finish(),
-      Allocation::UniqueRef(u) => f.debug_tuple("UniqueRef").field(&u).finish(),
-    }
-  }
-}
-
-impl<T: ?Sized> Deref for Allocation<T> {
-  type Target = T;
-  fn deref(&self) -> &Self::Target {
-    match self {
-      Self::Static(v) => v.borrow(),
-      Self::Arc(v) => v.borrow(),
-      Self::Box(v) => v.borrow(),
-      Self::Rc(v) => v.borrow(),
-      Self::UniqueRef(v) => v.borrow(),
-      Self::Other(v) => (**v).borrow(),
-    }
-  }
-}
-
-impl<T: ?Sized> AsRef<T> for Allocation<T> {
-  fn as_ref(&self) -> &T {
-    self
-  }
-}
-
-impl<T: ?Sized> Borrow<T> for Allocation<T> {
-  fn borrow(&self) -> &T {
-    self
-  }
 }
 
 #[repr(C)]
@@ -501,6 +393,7 @@ impl From<Option<bool>> for MaybeBool {
 #[repr(transparent)]
 pub struct CxxVTable(pub *const Opaque);
 
+#[allow(unused)]
 #[derive(Copy, Clone, Debug)]
 pub struct RustVTable<DynT>(pub *const Opaque, pub PhantomData<DynT>);
 
@@ -529,16 +422,20 @@ impl<F> FieldOffset<F> {
 
   #[allow(clippy::wrong_self_convention)]
   pub unsafe fn to_embedder<E>(self, field: &F) -> &E {
-    (((field as *const _ as usize) - self.0) as *const E)
-      .as_ref()
-      .unwrap()
+    unsafe {
+      (((field as *const _ as usize) - self.0) as *const E)
+        .as_ref()
+        .unwrap()
+    }
   }
 
   #[allow(clippy::wrong_self_convention)]
   pub unsafe fn to_embedder_mut<E>(self, field: &mut F) -> &mut E {
-    (((field as *mut _ as usize) - self.0) as *mut E)
-      .as_mut()
-      .unwrap()
+    unsafe {
+      (((field as *mut _ as usize) - self.0) as *mut E)
+        .as_mut()
+        .unwrap()
+    }
   }
 }
 
@@ -673,13 +570,13 @@ where
 
 macro_rules! impl_c_fn_from {
   ($($arg:ident: $ty:ident),*) => {
-    impl<F, R, $($ty),*> CFnFrom<F> for extern "C" fn($($ty),*) -> R
+    impl<F, R, $($ty),*> CFnFrom<F> for unsafe extern "C" fn($($ty),*) -> R
     where
       F: UnitType + Fn($($ty),*) -> R,
     {
       #[inline(always)]
       fn mapping() -> Self {
-        extern "C" fn c_fn<F, R, $($ty),*>($($arg: $ty),*) -> R
+        unsafe extern "C" fn c_fn<F, R, $($ty),*>($($arg: $ty),*) -> R
         where
           F: UnitType + Fn($($ty),*) -> R,
         {
@@ -728,8 +625,6 @@ where
 mod tests {
   use super::*;
   use std::ptr::null;
-  use std::sync::atomic::AtomicBool;
-  use std::sync::atomic::Ordering;
 
   #[derive(Eq, PartialEq)]
   struct MockSharedObj {
@@ -829,97 +724,5 @@ mod tests {
   fn shared_ref_use_count_assertion_failed() {
     let shared_ref = SharedRef(MockSharedObj::SHARED_PTR_BASE_B);
     shared_ref.assert_use_count_eq(7);
-  }
-
-  static TEST_OBJ_DROPPED: AtomicBool = AtomicBool::new(false);
-
-  struct TestObj {
-    pub id: u32,
-  }
-
-  impl Drop for TestObj {
-    fn drop(&mut self) {
-      assert!(!TEST_OBJ_DROPPED.swap(true, Ordering::SeqCst));
-    }
-  }
-
-  struct TestObjRef(TestObj);
-
-  impl Deref for TestObjRef {
-    type Target = TestObj;
-
-    fn deref(&self) -> &TestObj {
-      &self.0
-    }
-  }
-
-  impl Borrow<TestObj> for TestObjRef {
-    fn borrow(&self) -> &TestObj {
-      self
-    }
-  }
-
-  #[test]
-  fn allocation() {
-    // Static.
-    static STATIC_OBJ: TestObj = TestObj { id: 1 };
-    let owner = Allocation::of(&STATIC_OBJ);
-    match owner {
-      Allocation::Static(_) => assert_eq!(owner.id, 1),
-      _ => panic!(),
-    }
-    drop(owner);
-    assert!(!TEST_OBJ_DROPPED.load(Ordering::SeqCst));
-
-    // Arc.
-    let owner = Allocation::of(Arc::new(TestObj { id: 2 }));
-    match owner {
-      Allocation::Arc(_) => assert_eq!(owner.id, 2),
-      _ => panic!(),
-    }
-    drop(owner);
-    assert!(TEST_OBJ_DROPPED.swap(false, Ordering::SeqCst));
-
-    // Box.
-    let owner = Allocation::of(Box::new(TestObj { id: 3 }));
-    match owner {
-      Allocation::Box(_) => assert_eq!(owner.id, 3),
-      _ => panic!(),
-    }
-    drop(owner);
-    assert!(TEST_OBJ_DROPPED.swap(false, Ordering::SeqCst));
-
-    // Rc.
-    let owner = Allocation::of(Rc::new(TestObj { id: 4 }));
-    match owner {
-      Allocation::Rc(_) => assert_eq!(owner.id, 4),
-      _ => panic!(),
-    }
-    drop(owner);
-    assert!(TEST_OBJ_DROPPED.swap(false, Ordering::SeqCst));
-
-    // Other.
-    let owner = Allocation::of(TestObjRef(TestObj { id: 5 }));
-    match owner {
-      Allocation::Other(_) => assert_eq!(owner.id, 5),
-      _ => panic!(),
-    }
-    drop(owner);
-    assert!(TEST_OBJ_DROPPED.swap(false, Ordering::SeqCst));
-
-    // Contents of Vec should not be moved.
-    let vec = vec![1u8, 2, 3, 5, 8, 13, 21];
-    let vec_element_ptrs =
-      vec.iter().map(|i| i as *const u8).collect::<Vec<_>>();
-    let owner = Allocation::of(vec);
-    match owner {
-      Allocation::Other(_) => {}
-      _ => panic!(),
-    }
-    owner
-      .iter()
-      .map(|i| i as *const u8)
-      .zip(vec_element_ptrs)
-      .for_each(|(p1, p2)| assert_eq!(p1, p2));
   }
 }

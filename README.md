@@ -1,6 +1,6 @@
 # Rusty V8 Binding
 
-V8 Version: 12.6.228.3
+V8 Version: 13.7.152.7
 
 [![ci](https://github.com/denoland/rusty_v8/workflows/ci/badge.svg?branch=main)](https://github.com/denoland/rusty_v8/actions)
 [![crates](https://img.shields.io/crates/v/v8.svg)](https://crates.io/crates/v8)
@@ -29,6 +29,18 @@ V8 Version: 12.6.228.3
 4. Publish the crate on crates.io and allow docs.rs to generate documentation.
    Due to the complexity and size of V8's build, this is nontrivial. For example
    the crate size must be kept under 10 MiB in order to publish.
+
+## Versioning
+
+Rusty V8's major version aligns with Chrome's major version, which corresponds
+to a specific V8 release. For example, Rusty V8 `129.0.0` maps to Chrome
+`129.x.y.z`, which uses V8 `12.9.a.b`. While the minor and patch numbers between
+Chrome and V8 may differ, Rusty V8 will follow Chrome's release schedule, with a
+new major version every 4 weeks.
+
+As a Rust crate, Rusty V8 follows semantic versioning (semver) and will not
+introduce breaking changes within a major version. However, major version bumps
+will occur regularly to stay in sync with Chrome's release cycle.
 
 ## Binary Build
 
@@ -115,7 +127,9 @@ For Mac builds: You'll need Xcode and Xcode CLT installed. Recent macOS versions
 will also require you to pass PYTHON=python3 because macOS no longer ships with
 `python` simlinked to Python 3.
 
-For Android builds: You'll need to cross compile from a x86_64 host to the aarch64 or x64 android. You can use the following commands:
+For Android builds: You'll need to cross compile from a x86_64 host to the
+aarch64 or x64 android. You can use the following commands:
+
 ```bash
 rustup target add aarch64-linux-android  # or x86_64-linux-android
 V8_FROM_SOURCE=1 cargo build -vv --target aarch64-linux-android

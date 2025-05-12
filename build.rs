@@ -1,11 +1,10 @@
 // Copyright 2018-2019 the Deno authors. All rights reserved. MIT license.
 use fslock::LockFile;
-use miniz_oxide::inflate::stream::inflate;
-use miniz_oxide::inflate::stream::InflateState;
 use miniz_oxide::MZFlush;
-use miniz_oxide::MZResult;
 use miniz_oxide::MZStatus;
 use miniz_oxide::StreamResult;
+use miniz_oxide::inflate::stream::InflateState;
+use miniz_oxide::inflate::stream::inflate;
 use std::collections::HashSet;
 use std::env;
 use std::fs;
@@ -15,7 +14,6 @@ use std::io::Seek;
 use std::io::Write;
 use std::path::Path;
 use std::path::PathBuf;
-use std::process::exit;
 use std::process::Command;
 use std::process::Stdio;
 use which::which;
@@ -42,17 +40,18 @@ fn main() {
     "OUT_DIR",
     "RUSTY_V8_ARCHIVE",
     "RUSTY_V8_MIRROR",
+    "RUSTY_V8_SRC_BINDING_PATH",
     "SCCACHE",
     "V8_FORCE_DEBUG",
     "V8_FROM_SOURCE",
     "PYTHON",
     "DISABLE_CLANG",
     "EXTRA_GN_ARGS",
-    "NO_PRINT_GN_ARGS",
+    "PRINT_GN_ARGS",
     "CARGO_ENCODED_RUSTFLAGS",
   ];
   for env in envs {
-    println!("cargo:rerun-if-env-changed={}", env);
+    println!("cargo:rerun-if-env-changed={env}");
   }
 
   // Detect if trybuild tests are being compiled.
@@ -67,11 +66,11 @@ fn main() {
     .as_ref()
     .and_then(|p| p.file_stem())
     .and_then(|f| f.to_str())
-    .map(|s| s.starts_with("rls"))
-    .unwrap_or(false);
+    .is_some_and(|s| s.starts_with("rls"));
 
   // Early exit
   if is_cargo_doc || is_rls {
+    print_prebuilt_src_binding_path();
     return;
   }
 
@@ -79,6 +78,10 @@ fn main() {
 
   // Don't attempt rebuild but link
   if is_trybuild {
+    println!(
+      "cargo:rustc-env=RUSTY_V8_SRC_BINDING_PATH={}",
+      env::var("RUSTY_V8_SRC_BINDING_PATH").unwrap()
+    );
     return;
   }
 
@@ -91,19 +94,38 @@ fn main() {
     false
   };
 
+  // Cargo likes to run multiple build scripts at once sometimes.
+  // Nothing that follows is safe to run multiple times at once,
+  // because we store everything in a parent directory of OUT_DIR.
+  let _lockfile = acquire_lock();
 
-  // Build from source -- FORCED for dynamic library build
+  // Build from source
   // if env_bool("V8_FROM_SOURCE") {
+  // Replaced with if true to force build from source since we need patches to abseil
   if true {
-    if is_asan && std::env::var_os("OPT_LEVEL").unwrap_or_default() == "0" {
-      panic!("v8 crate cannot be compiled with OPT_LEVEL=0 and ASAN.\nTry `[profile.dev.package.v8] opt-level = 1`.\nAborting before miscompilations cause issues.");
+    if is_asan && env::var_os("OPT_LEVEL").unwrap_or_default() == "0" {
+      panic!(
+        "v8 crate cannot be compiled with OPT_LEVEL=0 and ASAN.\nTry `[profile.dev.package.v8] opt-level = 1`.\nAborting before miscompilations cause issues."
+      );
     }
 
-    return build_v8(is_asan);
+    // cargo publish doesn't like pyc files.
+    unsafe {
+      env::set_var("PYTHONDONTWRITEBYTECODE", "1");
+    }
+
+    build_v8(is_asan);
+    build_binding();
+
+    return;
   }
 
-  // utilize a lockfile to prevent linking of
-  // only partially downloaded static library.
+  print_prebuilt_src_binding_path();
+
+  download_static_lib_binaries();
+}
+
+fn acquire_lock() -> LockFile {
   let root = env::current_dir().unwrap();
   let out_dir = env::var_os("OUT_DIR").unwrap();
   let lockfilepath = root
@@ -112,28 +134,55 @@ fn main() {
     .unwrap()
     .parent()
     .unwrap()
-    .join("lib_download.fslock");
-  println!("download lockfile: {:?}", &lockfilepath);
+    .join("v8.fslock");
   let mut lockfile = LockFile::open(&lockfilepath)
     .expect("Couldn't open lib download lockfile.");
-  lockfile.lock().expect("Couldn't get lock");
-  download_static_lib_binaries();
-  lockfile.unlock().expect("Couldn't unlock lockfile");
+  lockfile.lock_with_pid().expect("Couldn't get lock");
+  println!("lockfile: {lockfilepath:?}");
+  lockfile
+}
+
+fn build_binding() {
+  let output = Command::new(python())
+    .arg("./tools/get_bindgen_args.py")
+    .arg("--gn-out")
+    .arg(build_dir().join("gn_out"))
+    .output()
+    .unwrap();
+  let args = String::from_utf8(output.stdout).unwrap();
+  let args = args.split('\0').collect::<Vec<_>>();
+
+  let bindings = bindgen::Builder::default()
+    .header("src/binding.hpp")
+    .parse_callbacks(Box::new(bindgen::CargoCallbacks::new()))
+    .clang_args(["-x", "c++", "-std=c++20", "-Iv8/include", "-I."])
+    .clang_args(args)
+    .generate_cstr(true)
+    .rustified_enum(".*UseCounterFeature")
+    .rustified_enum(".*ModuleImportPhase")
+    .bitfield_enum(".*GCType")
+    .bitfield_enum(".*GCCallbackFlags")
+    .allowlist_item("v8__.*")
+    .allowlist_item("cppgc__.*")
+    .allowlist_item("RustObj")
+    .allowlist_item("memory_span_t")
+    .allowlist_item("ExternalConstOneByteStringResource")
+    .generate()
+    .expect("Unable to generate bindings");
+
+  let out_path = build_dir().join("gn_out").join("src_binding.rs");
+  println!(
+    "cargo:rustc-env=RUSTY_V8_SRC_BINDING_PATH={}",
+    out_path.display()
+  );
+  bindings
+    .write_to_file(out_path)
+    .expect("Couldn't write bindings!");
 }
 
 fn build_v8(is_asan: bool) {
-  env::set_var("DEPOT_TOOLS_WIN_TOOLCHAIN", "0");
-
-  // cargo publish doesn't like pyc files.
-  env::set_var("PYTHONDONTWRITEBYTECODE", "1");
-
-  // git submodule update --init --recursive
-  let libcxx_src = PathBuf::from("buildtools/third_party/libc++/trunk/src");
-  if !libcxx_src.is_dir() {
-    eprintln!(
-      "missing source code. Run 'git submodule update --init --recursive'"
-    );
-    exit(1);
+  unsafe {
+    env::set_var("DEPOT_TOOLS_WIN_TOOLCHAIN", "0");
   }
 
   if need_gn_ninja_download() {
@@ -155,6 +204,16 @@ fn build_v8(is_asan: bool) {
   if is_asan {
     gn_args.push("is_asan=true".to_string());
   }
+
+  gn_args.push(format!(
+    "use_custom_libcxx={}",
+    env::var("CARGO_FEATURE_USE_CUSTOM_LIBCXX").is_ok()
+  ));
+  gn_args.push(format!(
+    "v8_enable_pointer_compression={}",
+    env::var("CARGO_FEATURE_V8_ENABLE_POINTER_COMPRESSION").is_ok()
+  ));
+  
   if env::var("CARGO_FEATURE_USE_CUSTOM_LIBCXX").is_err() {
     gn_args.push("use_custom_libcxx=false".to_string());
   }
@@ -221,7 +280,7 @@ fn build_v8(is_asan: bool) {
   } else {
     println!("using Chromium's clang");
     let clang_base_path = clang_download();
-    gn_args.push(format!("clang_base_path={:?}", clang_base_path));
+    gn_args.push(format!("clang_base_path={clang_base_path:?}"));
 
     if target_os == "android" && target_arch == "aarch64" {
       gn_args.push("treat_warnings_as_errors=false".to_string());
@@ -273,8 +332,8 @@ fn build_v8(is_asan: bool) {
     if target_arch == "x86_64" {
       maybe_install_sysroot("amd64");
     }
-    gn_args.push(format!(r#"v8_target_cpu="{}""#, arch).to_string());
-    gn_args.push(format!(r#"target_cpu="{}""#, arch).to_string());
+    gn_args.push(format!(r#"v8_target_cpu="{arch}""#).to_string());
+    gn_args.push(format!(r#"target_cpu="{arch}""#).to_string());
     gn_args.push(r#"target_os="android""#.to_string());
     gn_args.push("treat_warnings_as_errors=false".to_string());
     gn_args.push("use_sysroot=true".to_string());
@@ -305,14 +364,11 @@ fn build_v8(is_asan: bool) {
     static CHROMIUM_URI: &str = "https://chromium.googlesource.com";
     maybe_clone_repo(
       "./third_party/android_platform",
-      &format!(
-        "{}/chromium/src/third_party/android_platform.git",
-        CHROMIUM_URI
-      ),
+      &format!("{CHROMIUM_URI}/chromium/src/third_party/android_platform.git",),
     );
     maybe_clone_repo(
       "./third_party/catapult",
-      &format!("{}/catapult.git", CHROMIUM_URI),
+      &format!("{CHROMIUM_URI}/catapult.git"),
     );
   }
 
@@ -320,101 +376,116 @@ fn build_v8(is_asan: bool) {
     gn_args.push(r#"target_cpu="x86""#.to_string());
   }
 
-  let gn_root = env::var("CARGO_MANIFEST_DIR").unwrap();
-
-  let gn_out = maybe_gen(&gn_root, gn_args);
+  let gn_out = maybe_gen(&gn_args);
   assert!(gn_out.exists());
   assert!(gn_out.join("args.gn").exists());
-  if env::var_os("NO_PRINT_GN_ARGS").is_none() {
+  if env_bool("PRINT_GN_ARGS") {
     print_gn_args(&gn_out);
   }
   build("rusty_v8", None);
 }
 
 fn print_gn_args(gn_out_dir: &Path) {
-  assert!(Command::new(gn())
-    .arg(format!("--script-executable={}", python()))
-    .arg("args")
-    .arg(gn_out_dir)
-    .arg("--list")
-    .status()
-    .unwrap()
-    .success());
+  assert!(
+    Command::new(gn())
+      .arg(format!("--script-executable={}", python()))
+      .arg("args")
+      .arg(gn_out_dir)
+      .arg("--list")
+      .status()
+      .unwrap()
+      .success()
+  );
 }
 
 fn maybe_clone_repo(dest: &str, repo: &str) {
   if !Path::new(&dest).exists() {
-    assert!(Command::new("git")
-      .arg("clone")
-      .arg("--depth=1")
-      .arg(repo)
-      .arg(dest)
-      .status()
-      .unwrap()
-      .success());
+    assert!(
+      Command::new("git")
+        .arg("clone")
+        .arg("--depth=1")
+        .arg(repo)
+        .arg(dest)
+        .status()
+        .unwrap()
+        .success()
+    );
   }
 }
 
 fn maybe_install_sysroot(arch: &str) {
-  let sysroot_path = format!("build/linux/debian_sid_{}-sysroot", arch);
+  let sysroot_path = format!("build/linux/debian_sid_{arch}-sysroot");
   if !PathBuf::from(sysroot_path).is_dir() {
-    assert!(Command::new(python())
-      .arg("./build/linux/sysroot_scripts/install-sysroot.py")
-      .arg(format!("--arch={}", arch))
-      .status()
-      .unwrap()
-      .success());
+    assert!(
+      Command::new(python())
+        .arg("./build/linux/sysroot_scripts/install-sysroot.py")
+        .arg(format!("--arch={arch}"))
+        .status()
+        .unwrap()
+        .success()
+    );
   }
 }
 
-fn host_platform() -> String {
-  let os = if cfg!(target_os = "linux") {
-    "linux"
-  } else if cfg!(target_os = "macos") {
-    "mac"
-  } else if cfg!(target_os = "windows") {
-    "windows"
-  } else {
-    "unknown"
-  };
-
-  let arch = if cfg!(target_arch = "x86_64") {
-    "amd64"
-  } else if cfg!(target_arch = "aarch64") {
-    "arm64"
-  } else if cfg!(target_arch = "arm") {
-    "arm"
-  } else {
-    "unknown"
-  };
-  format!("{os}-{arch}")
-}
-
 fn download_ninja_gn_binaries() {
-  let target_dir = build_dir();
-  let bin_dir = target_dir
-    .join("ninja_gn_binaries-20221218")
-    .join(host_platform());
-  let gn = bin_dir.join("gn");
-  let ninja = bin_dir.join("ninja");
+  let target_dir = build_dir().join("ninja_gn_binaries");
+
+  let gn = target_dir.join("gn").join("gn");
+  let ninja = target_dir.join("ninja").join("ninja");
   #[cfg(windows)]
   let gn = gn.with_extension("exe");
   #[cfg(windows)]
   let ninja = ninja.with_extension("exe");
 
   if !gn.exists() || !ninja.exists() {
-    assert!(Command::new(python())
-      .arg("./tools/ninja_gn_binaries.py")
-      .arg("--dir")
-      .arg(&target_dir)
-      .status()
-      .unwrap()
-      .success());
+    assert!(
+      Command::new(python())
+        .arg("./tools/ninja_gn_binaries.py")
+        .arg("--dir")
+        .arg(&target_dir)
+        .status()
+        .unwrap()
+        .success()
+    );
   }
   assert!(gn.exists());
   assert!(ninja.exists());
-  env::set_var("GN", gn);
-  env::set_var("NINJA", ninja);
+  unsafe {
+    env::set_var("GN", gn);
+  }
+  if env::var("NINJA").is_err() {
+    unsafe {
+      env::set_var("NINJA", ninja);
+    }
+  }
+}
+
+fn prebuilt_profile() -> &'static str {
+  let target_os = env::var("CARGO_CFG_TARGET_OS").unwrap();
+  // Use v8 in release mode unless $V8_FORCE_DEBUG=true
+  // Note: we always use the release build on windows.
+  if target_os != "windows" && env_bool("V8_FORCE_DEBUG") {
+    "debug"
+  } else {
+    "release"
+  }
+}
+
+fn prebuilt_features_suffix() -> String {
+  let mut features = String::new();
+  if env::var("CARGO_FEATURE_V8_ENABLE_POINTER_COMPRESSION").is_ok() {
+    features.push_str("_ptrcomp");
+  }
+  features
+}
+
+fn static_lib_name(suffix: &str) -> String {
+  let target_os = env::var("CARGO_CFG_TARGET_OS").unwrap();
+  if target_os == "windows" {
+    format!("rusty_v8{suffix}.lib")
+  } else {
+    format!("librusty_v8{suffix}.a")
+  }
 }
 
 fn static_lib_url() -> String {
@@ -426,46 +497,22 @@ fn static_lib_url() -> String {
     env::var("RUSTY_V8_MIRROR").unwrap_or_else(|_| default_base.into());
   let version = env::var("CARGO_PKG_VERSION").unwrap();
   let target = env::var("TARGET").unwrap();
-  let target_os = env::var("CARGO_CFG_TARGET_OS").unwrap();
-  // Note: we always use the release build on windows.
-  if target_os == "windows" {
-    return format!("{}/v{}/rusty_v8_release_{}.lib.gz", base, version, target);
-  }
-  // Use v8 in release mode unless $V8_FORCE_DEBUG=true
-  let profile = match env_bool("V8_FORCE_DEBUG") {
-    true => "debug",
-    _ => "release",
-  };
+  let profile = prebuilt_profile();
+  let features = prebuilt_features_suffix();
   format!(
-    "{}/v{}/librusty_v8_{}_{}.a.gz",
-    base, version, profile, target
+    "{base}/v{version}/{}.gz",
+    static_lib_name(&format!("{features}_{profile}_{target}")),
   )
-}
-
-fn env_bool(key: &str) -> bool {
-  matches!(
-    env::var(key).unwrap_or_default().as_str(),
-    "true" | "1" | "yes"
-  )
-}
-
-fn static_lib_name() -> &'static str {
-  let target_os = env::var("CARGO_CFG_TARGET_OS").unwrap();
-  if target_os == "windows" {
-    "rusty_v8.lib"
-  } else {
-    "librusty_v8.a"
-  }
 }
 
 fn static_lib_path() -> PathBuf {
-  static_lib_dir().join(static_lib_name())
+  static_lib_dir().join(static_lib_name(""))
 }
 
-fn static_checksum_path() -> PathBuf {
-  let mut t = static_lib_path();
-  t.set_extension("sum");
-  t
+fn static_checksum_path(path: &Path) -> PathBuf {
+  let mut path = path.to_path_buf();
+  path.set_extension("sum");
+  path
 }
 
 fn static_lib_dir() -> PathBuf {
@@ -473,16 +520,16 @@ fn static_lib_dir() -> PathBuf {
 }
 
 fn build_dir() -> PathBuf {
-  let root = env::current_dir().unwrap();
+  let cwd = env::current_dir().unwrap();
 
   // target/debug//build/rusty_v8-d9e5a424d4f96994/out/
   let out_dir = env::var_os("OUT_DIR").expect(
     "The 'OUT_DIR' environment is not set (it should be something like \
      'target/debug/rusty_v8-{hash}').",
   );
-  let out_dir_abs = root.join(out_dir);
+  let out_dir_abs = cwd.join(out_dir);
 
-  // This would be target/debug or target/release
+  // This would be `target/debug` or `target/release`
   out_dir_abs
     .parent()
     .unwrap()
@@ -500,41 +547,42 @@ fn replace_non_alphanumeric(url: &str) -> String {
     .collect()
 }
 
-fn download_file(url: String, filename: PathBuf) {
+fn download_file(url: &str, filename: &Path) {
   if !url.starts_with("http:") && !url.starts_with("https:") {
-    copy_archive(&url, &filename);
+    copy_archive(url, filename);
     return;
   }
+
+  // Checksum (i.e: url) to avoid re-downloads
+  match fs::read_to_string(static_checksum_path(filename)) {
+    Ok(c) if c == static_lib_url() => return,
+    _ => {}
+  };
 
   // If there is a `.cargo/.rusty_v8/<escaped URL>` file, use that instead
   // of downloading.
   if let Ok(mut path) = home::cargo_home() {
-    path = path.join(".rusty_v8").join(replace_non_alphanumeric(&url));
+    path = path.join(".rusty_v8").join(replace_non_alphanumeric(url));
     println!("Looking for download in '{path:?}'");
     if path.exists() {
-      copy_archive(&path.to_string_lossy(), &filename);
+      copy_archive(&path.to_string_lossy(), filename);
       return;
     }
   }
 
-  // tmp file to download to so we don't clobber the existing one
-  let tmpfile = {
-    let mut t = filename.clone();
-    t.set_extension("tmp");
-    t
-  };
+  let tmpfile = filename.with_extension("tmp");
   if tmpfile.exists() {
     println!("Deleting old tmpfile {}", tmpfile.display());
-    std::fs::remove_file(&tmpfile).unwrap();
+    fs::remove_file(&tmpfile).unwrap();
   }
 
   // Try downloading with python first. Python is a V8 build dependency,
   // so this saves us from adding a Rust HTTP client dependency.
-  println!("Downloading (using Python) {}", url);
+  println!("Downloading (using Python) {url}");
   let status = Command::new(python())
     .arg("./tools/download_file.py")
     .arg("--url")
-    .arg(&url)
+    .arg(url)
     .arg("--filename")
     .arg(&tmpfile)
     .status();
@@ -551,7 +599,7 @@ fn download_file(url: String, filename: PathBuf) {
         .arg("-s")
         .arg("-o")
         .arg(&tmpfile)
-        .arg(&url)
+        .arg(url)
         .status()
         .unwrap()
     }
@@ -562,29 +610,24 @@ fn download_file(url: String, filename: PathBuf) {
   assert!(tmpfile.exists());
 
   // Write checksum (i.e url) & move file
-  std::fs::write(static_checksum_path(), url).unwrap();
-  copy_archive(&tmpfile.to_string_lossy(), &filename);
-  std::fs::remove_file(&tmpfile).unwrap();
+  fs::write(static_checksum_path(filename), url).unwrap();
+  copy_archive(&tmpfile.to_string_lossy(), filename);
+  fs::remove_file(&tmpfile).unwrap();
 
   assert!(filename.exists());
-  assert!(static_checksum_path().exists());
+  assert!(static_checksum_path(filename).exists());
   assert!(!tmpfile.exists());
 }
 
 fn download_static_lib_binaries() {
   let url = static_lib_url();
-  println!("static lib URL: {}", url);
+  println!("static lib URL: {url}");
 
   let dir = static_lib_dir();
-  std::fs::create_dir_all(&dir).unwrap();
+  fs::create_dir_all(&dir).unwrap();
   println!("cargo:rustc-link-search={}", dir.display());
 
-  // Checksum (i.e: url) to avoid redownloads
-  match std::fs::read_to_string(static_checksum_path()) {
-    Ok(c) if c == static_lib_url() => return,
-    _ => {}
-  };
-  download_file(url, static_lib_path());
+  download_file(&url, &static_lib_path());
 }
 
 fn decompress_to_writer<R, W>(input: &mut R, output: &mut W) -> io::Result<()>
@@ -598,7 +641,7 @@ where
   let mut input_offset = 0; 
 
   // Skip the gzip header
-  gzip_header::read_gz_header(input).unwrap();
+  gzip_header::read_gz_header(input)?;
 
   loop {
     let bytes_read = input.read(&mut input_buffer[input_offset..])?;
@@ -615,9 +658,7 @@ where
       MZFlush::None,
     );
 
-    if status != MZResult::Ok(MZStatus::Ok)
-      && status != MZResult::Ok(MZStatus::StreamEnd)
-    {
+    if status != Ok(MZStatus::Ok) && status != Ok(MZStatus::StreamEnd) {
       return Err(io::Error::new(
         io::ErrorKind::Other,
         format!("Decompression error {status:?}"),
@@ -630,7 +671,7 @@ where
     input_buffer.copy_within(bytes_consumed..bytes_avail, 0);
     input_offset = bytes_avail - bytes_consumed;
 
-    if status == MZResult::Ok(MZStatus::StreamEnd) {
+    if status == Ok(MZStatus::StreamEnd) {
       break; // End of decompression
     }
   }
@@ -640,8 +681,8 @@ where
 
 /// Copy the V8 archive at `url` to `filename`.
 ///
-/// This function doesn't use `std::fs::copy` because that would
-/// preveserve the file attributes such as ownership and mode flags.
+/// This function doesn't use [`fs::copy`] because that would
+/// preserve the file attributes such as ownership and mode flags.
 /// Instead, it copies the file contents to a new file.
 /// This is necessary because the V8 archive could live inside a read-only
 /// filesystem, and subsequent builds would fail to overwrite it.
@@ -655,10 +696,10 @@ fn copy_archive(url: &str, filename: &Path) {
   src.read_exact(&mut header).unwrap();
   src.seek(io::SeekFrom::Start(0)).unwrap();
   if header == [0x1f, 0x8b] {
-    println!("Detected GZIP archive");
+    println!("Detected GZIP archive: {url}");
     decompress_to_writer(&mut src, &mut dst).unwrap();
   } else {
-    println!("Not a GZIP archive");
+    println!("Not a GZIP archive: {url}");
     io::copy(&mut src, &mut dst).unwrap();
   }
 }
@@ -687,7 +728,7 @@ fn print_link_flags() {
    */
   let should_dyn_link_libcxx = env::var("CARGO_FEATURE_USE_CUSTOM_LIBCXX")
     .is_err()
-    || env::var("GN_ARGS").map_or(false, |gn_args| {
+    || env::var("GN_ARGS").is_ok_and(|gn_args| {
       gn_args
         .split_whitespace()
         .any(|ba| ba == "use_custom_libcxx=false")
@@ -697,7 +738,7 @@ fn print_link_flags() {
     // Based on https://github.com/alexcrichton/cc-rs/blob/fba7feded71ee4f63cfe885673ead6d7b4f2f454/src/lib.rs#L2462
     if let Ok(stdlib) = env::var("CXXSTDLIB") {
       if !stdlib.is_empty() {
-        println!("cargo:rustc-link-lib=dylib={}", stdlib);
+        println!("cargo:rustc-link-lib=dylib={stdlib}");
       }
     } else {
       let target = env::var("TARGET").unwrap();
@@ -734,19 +775,44 @@ fn print_link_flags() {
   }
 }
 
+fn print_prebuilt_src_binding_path() {
+  if let Ok(binding) = env::var("RUSTY_V8_SRC_BINDING_PATH") {
+    println!("cargo:rustc-env=RUSTY_V8_SRC_BINDING_PATH={binding}");
+    return;
+  }
+
+  let target = env::var("TARGET").unwrap();
+  let profile = prebuilt_profile();
+  let features = prebuilt_features_suffix();
+  let name = format!("src_binding{features}_{profile}_{target}.rs");
+
+  let src_binding_path = get_dirs().root.join("gen").join(name.clone());
+
+  if let Ok(base) = env::var("RUSTY_V8_MIRROR") {
+    let version = env::var("CARGO_PKG_VERSION").unwrap();
+    let url = format!("{base}/v{version}/{name}");
+    download_file(&url, &src_binding_path);
+  }
+
+  println!(
+    "cargo:rustc-env=RUSTY_V8_SRC_BINDING_PATH={}",
+    src_binding_path.display()
+  );
+}
 
 // Chromium depot_tools contains helpers
 // which delegate to the "relevant" `buildtools`
 // directory when invoked, so they don't count.
+#[allow(clippy::needless_pass_by_value)]
 fn not_in_depot_tools(p: PathBuf) -> bool {
-  !p.as_path().to_str().unwrap().contains("depot_tools")
+  !p.to_str().unwrap().contains("depot_tools")
 }
 
 fn need_gn_ninja_download() -> bool {
-  let has_ninja = which("ninja").map_or(false, not_in_depot_tools)
+  let has_ninja = which("ninja").is_ok_and(not_in_depot_tools)
     || env::var_os("NINJA").is_some();
-  let has_gn = which("gn").map_or(false, not_in_depot_tools)
-    || env::var_os("GN").is_some();
+  let has_gn =
+    which("gn").is_ok_and(not_in_depot_tools) || env::var_os("GN").is_some();
 
   !has_ninja || !has_gn
 }
@@ -833,19 +899,21 @@ fn find_compatible_system_clang(target_os: &str) -> Option<PathBuf> {
 fn clang_download() -> PathBuf {
   let clang_base_path = build_dir().join("clang");
   println!("clang_base_path (downloaded) {}", clang_base_path.display());
-  assert!(Command::new(python())
-    .arg("./tools/clang/scripts/update.py")
-    .arg("--output-dir")
-    .arg(&clang_base_path)
-    .status()
-    .unwrap()
-    .success());
+  assert!(
+    Command::new(python())
+      .arg("./tools/clang/scripts/update.py")
+      .arg("--output-dir")
+      .arg(&clang_base_path)
+      .status()
+      .unwrap()
+      .success()
+  );
   assert!(clang_base_path.exists());
   clang_base_path
 }
 
 fn cc_wrapper(gn_args: &mut Vec<String>, sccache_path: &Path) {
-  gn_args.push(format!("cc_wrapper={:?}", sccache_path));
+  gn_args.push(format!("cc_wrapper={sccache_path:?}"));
 }
 
 struct Dirs {
@@ -853,7 +921,7 @@ struct Dirs {
   pub root: PathBuf,
 }
 
-fn get_dirs(manifest_dir: Option<&str>) -> Dirs {
+fn get_dirs() -> Dirs {
   // The OUT_DIR is going to be a crate-specific directory like
   // "target/debug/build/cargo_gn_example-eee5160084460b2c"
   // But we want to share the GN build amongst all crates
@@ -871,11 +939,7 @@ fn get_dirs(manifest_dir: Option<&str>) -> Dirs {
     .unwrap()
     .to_owned();
 
-  let root = match manifest_dir {
-    Some(s) => env::current_dir().unwrap().join(s),
-    None => env::var("CARGO_MANIFEST_DIR").map(PathBuf::from).unwrap(),
-  };
-
+  let root = env::var("CARGO_MANIFEST_DIR").map(PathBuf::from).unwrap();
   let mut dirs = Dirs { out, root };
   maybe_symlink_root_dir(&mut dirs);
   dirs
@@ -888,9 +952,9 @@ fn maybe_symlink_root_dir(_: &mut Dirs) {}
 fn maybe_symlink_root_dir(dirs: &mut Dirs) {
   // GN produces invalid paths if the source (a.k.a. root) directory is on a
   // different drive than the output. If this is the case we'll create a
-  // symlink called "gn_root' in the out directory, next to 'gn_out', so it
+  // symlink called 'gn_root' in the out directory, next to 'gn_out', so it
   // appears as if they're both on the same drive.
-  use std::fs::remove_dir;
+  use fs::{remove_dir_all, remove_file};
   use std::os::windows::fs::symlink_dir;
 
   let get_prefix = |p: &Path| {
@@ -908,14 +972,36 @@ fn maybe_symlink_root_dir(dirs: &mut Dirs) {
     let symlink = &*out.join("gn_root");
     let target = &*root.canonicalize().unwrap();
 
-    println!("Creating symlink {:?} to {:?}", &symlink, &root);
+    println!("Creating symlink {symlink:?} to {root:?}");
 
+    let mut retries = 0;
     loop {
       match symlink.canonicalize() {
         Ok(existing) if existing == target => break,
-        Ok(_) => remove_dir(symlink).expect("remove_dir failed"),
-        Err(_) => {
-          break symlink_dir(target, symlink).expect("symlink_dir failed")
+        Ok(_) => remove_dir_all(symlink).expect("remove_dir_all failed"),
+        Err(err) => {
+          println!("symlink.canonicalize failed: {err:?}");
+          // we're having very strange issues on GHA when the cache
+          // is restored, so trying this out temporarily
+          if let Err(err) = remove_dir_all(symlink) {
+            eprintln!("remove_dir_all failed: {err:?}");
+            if let Err(err) = remove_file(symlink) {
+              eprintln!("remove_file failed: {err:?}");
+            }
+          }
+          match symlink_dir(target, symlink) {
+            Ok(_) => break,
+            Err(err) => {
+              println!("symlink_dir failed: {err:?}");
+              retries += 1;
+              std::thread::sleep(std::time::Duration::from_millis(
+                50 * retries,
+              ));
+              if retries > 4 {
+                panic!("Failed to create symlink");
+              }
+            }
+          }
         }
       }
     }
@@ -933,7 +1019,7 @@ pub fn is_debug() -> bool {
   } else if m == "debug" {
     true
   } else {
-    panic!("unhandled PROFILE value {}", m)
+    panic!("unhandled PROFILE value {m}")
   }
 }
 
@@ -957,14 +1043,15 @@ fn python() -> String {
 type NinjaEnv = Vec<(String, String)>;
 
 fn ninja(gn_out_dir: &Path, maybe_env: Option<NinjaEnv>) -> Command {
-  let cmd_string = env::var("NINJA").unwrap_or_else(|_| "C:\\Strawberry\\c\\bin\\ninja.exe".to_owned());
-  println!("Using ninja: {}", cmd_string);
-  let mut cmd = Command::new(cmd_string);
+  let cmd_string = env::var("NINJA").unwrap_or_else(|_| "ninja".to_owned());
+  let mut cmd = Command::new(&cmd_string);
   cmd.arg("-C");
   cmd.arg(gn_out_dir);
-  if let Ok(jobs) = env::var("NUM_JOBS") {
-    cmd.arg("-j");
-    cmd.arg(jobs);
+  if !cmd_string.ends_with("autoninja") {
+    if let Ok(jobs) = env::var("NUM_JOBS") {
+      cmd.arg("-j");
+      cmd.arg(jobs);
+    }
   }
   if let Some(env) = maybe_env {
     for item in env {
@@ -974,19 +1061,17 @@ fn ninja(gn_out_dir: &Path, maybe_env: Option<NinjaEnv>) -> Command {
   cmd
 }
 
-pub type GnArgs = Vec<String>;
-
-pub fn maybe_gen(manifest_dir: &str, gn_args: GnArgs) -> PathBuf {
-  let dirs = get_dirs(Some(manifest_dir));
-  let target_arch = env::var("CARGO_CFG_TARGET_ARCH").unwrap();
-  let gn_out_dir = dirs.out.join("gn_out").join(target_arch);
+fn maybe_gen(gn_args: &[String]) -> PathBuf {
+  let dirs = get_dirs();
+  // let gn_out_dir = dirs.out.join("gn_out").join(target_arch);
+  let gn_out_dir = dirs.out.join("gn_out");
 
   if !gn_out_dir.exists() || !gn_out_dir.join("build.ninja").exists() {
-    let args = if let Ok(extra_args) = env::var("EXTRA_GN_ARGS") {
-      format!("{} {}", gn_args.join(" "), extra_args)
-    } else {
-      gn_args.join(" ")
-    };
+    let mut args = gn_args.join(" ");
+    if let Ok(extra_args) = env::var("EXTRA_GN_ARGS") {
+      args.push(' ');
+      args.push_str(&extra_args);
+    }
 
     let path = env::current_dir().unwrap();
     println!("The current directory is {}", path.display());
@@ -995,28 +1080,32 @@ pub fn maybe_gen(manifest_dir: &str, gn_args: GnArgs) -> PathBuf {
       dirs.root.display(),
       gn_out_dir.display()
     );
-    assert!(Command::new(gn())
-      .arg(format!("--root={}", dirs.root.display()))
-      .arg(format!("--script-executable={}", python()))
-      .arg("gen")
-      .arg(&gn_out_dir)
-      .arg("--args=".to_owned() + &args)
-      .stdout(Stdio::inherit())
-      .stderr(Stdio::inherit())
-      .envs(env::vars())
-      .status()
-      .expect("Could not run `gn`")
-      .success());
+    assert!(
+      Command::new(gn())
+        .arg(format!("--root={}", dirs.root.display()))
+        .arg(format!("--script-executable={}", python()))
+        .arg("gen")
+        .arg(&gn_out_dir)
+        .arg("--ide=json")
+        .arg("--args=".to_owned() + &args)
+        .stdout(Stdio::inherit())
+        .stderr(Stdio::inherit())
+        .envs(env::vars())
+        .status()
+        .expect("Could not run `gn`")
+        .success()
+    );
   }
   gn_out_dir
 }
 
 pub fn build(target: &str, maybe_env: Option<NinjaEnv>) {
-  let target_arch = env::var("CARGO_CFG_TARGET_ARCH").unwrap();
-  let gn_out_dir = get_dirs(None).out.join("gn_out").join(target_arch);
-  if !gn_out_dir.exists() {
-    fs::create_dir_all(&gn_out_dir).expect("Failed to create gn_out_dir");
-  }
+  // let target_arch = env::var("CARGO_CFG_TARGET_ARCH").unwrap();
+  // let gn_out_dir = get_dirs(None).out.join("gn_out").join(target_arch);
+  // if !gn_out_dir.exists() {
+  //  fs::create_dir_all(&gn_out_dir).expect("Failed to create gn_out_dir");
+  // }
+  let gn_out_dir = get_dirs().out.join("gn_out");
 
   println!("cargo:rerun-if-env-changed=CARGO_CFG_TARGET_ARCH");
   println!("cargo:rerun-if-env-changed=PROFILE");
@@ -1025,13 +1114,15 @@ pub fn build(target: &str, maybe_env: Option<NinjaEnv>) {
   // This helps Rust source files locate the snapshot, source map etc.
   println!("cargo:rustc-env=GN_OUT_DIR={}", gn_out_dir.display());
 
-  assert!(ninja(&gn_out_dir, maybe_env)
-    .arg(target)
-    .status()
-    .unwrap()
-    .success());
+  assert!(
+    ninja(&gn_out_dir, maybe_env)
+      .arg(target)
+      .status()
+      .unwrap()
+      .success()
+  );
 
-  // TODO This is not sufficent. We need to use "gn desc" to query the target
+  // TODO This is not sufficient. We need to use "gn desc" to query the target
   // and figure out what else we need to add to the link.
   println!(
     "cargo:rustc-link-search=native={}/obj/",
@@ -1044,9 +1135,9 @@ pub fn build(target: &str, maybe_env: Option<NinjaEnv>) {
 fn rerun_if_changed(out_dir: &Path, maybe_env: Option<NinjaEnv>, target: &str) {
   let deps = ninja_get_deps(out_dir, maybe_env, target);
   for d in deps {
-    let p = out_dir.join(d);
-    assert!(p.exists(), "Path doesn't exist: {:?}", p);
-    println!("cargo:rerun-if-changed={}", p.display());
+    if let Ok(p) = out_dir.join(d).canonicalize() {
+      println!("cargo:rerun-if-changed={}", p.display());
+    }
   }
 }
 
@@ -1085,8 +1176,7 @@ pub fn parse_ninja_deps(s: &str) -> HashSet<String> {
   out
 }
 
-/// A parser for the output of "ninja -t graph". It returns all of the input
-/// files.
+/// A parser for the output of "ninja -t graph". It returns all the input files.
 pub fn parse_ninja_graph(s: &str) -> HashSet<String> {
   let mut out = HashSet::new();
   // This is extremely hacky and likely to break.
@@ -1185,6 +1275,11 @@ fn patch_inspector_protocol() {
   } else {
       println!("Warning: Could not find outputs_pre line to patch in inspector_protocol.gni");
   }
+fn env_bool(key: &str) -> bool {
+  matches!(
+    env::var(key).unwrap_or_default().as_str(),
+    "true" | "1" | "yes"
+  )
 }
 
 #[cfg(test)]

@@ -11,7 +11,7 @@ fn main() {
   v8::V8::initialize();
   let isolate = &mut v8::Isolate::new(v8::CreateParams::default());
   let handle_scope = &mut v8::HandleScope::new(isolate);
-  let context = v8::Context::new(handle_scope);
+  let context = v8::Context::new(handle_scope, Default::default());
   let scope = &mut v8::ContextScope::new(handle_scope, context);
   let global = context.global(scope);
   {
@@ -65,12 +65,14 @@ fn main() {
     fn fast_fn() -> i32 {
       42
     }
-    const FAST_CALL: v8::fast_api::FastFunction =
-      v8::fast_api::FastFunction::new(
-        &[v8::fast_api::Type::V8Value],
-        v8::fast_api::CType::Int32,
-        fast_fn as _,
-      );
+    const FAST_CALL: v8::fast_api::CFunction = v8::fast_api::CFunction::new(
+      fast_fn as _,
+      &v8::fast_api::CFunctionInfo::new(
+        v8::fast_api::Type::Int32.as_info(),
+        &[v8::fast_api::Type::V8Value.as_info()],
+        v8::fast_api::Int64Representation::Number,
+      ),
+    );
     let template = v8::FunctionTemplate::builder(
       |scope: &mut v8::HandleScope,
        _: v8::FunctionCallbackArguments,
@@ -78,7 +80,7 @@ fn main() {
         rv.set(v8::Integer::new(scope, 42).into());
       },
     )
-    .build_fast(scope, &FAST_CALL, None, None, None);
+    .build_fast(scope, &[FAST_CALL]);
     let name = v8::String::new(scope, "new_fast").unwrap();
     let value = template.get_function(scope).unwrap();
 
@@ -128,17 +130,16 @@ fn main() {
       &["undefined_from_scope", "undefined_from_isolate"][..],
     ),
   ] {
-    println!("Running {} ...", group_name);
+    println!("Running {group_name} ...");
     for x in benches {
       let code = format!(
         "
-            function bench() {{ return {}(); }};
-            runs = {};
+            function bench() {{ return {x}(); }};
+            runs = {runs};
             start = Date.now();
             for (i = 0; i < runs; i++) bench();
             Date.now() - start;
           ",
-        x, runs
       );
 
       let r = eval(scope, &code).unwrap();
@@ -148,8 +149,7 @@ fn main() {
       let ns_per_run = total_ns / (runs as f64);
       let mops_per_sec = (runs as f64) / (total_ms / 1000.0) / 1e6;
       println!(
-        "  {:.1} ns per run {:.1} million ops/sec → {}",
-        ns_per_run, mops_per_sec, x
+        "  {ns_per_run:.1} ns per run {mops_per_sec:.1} million ops/sec → {x}"
       );
     }
   }

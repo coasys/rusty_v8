@@ -1,6 +1,9 @@
 use crate::ArrayBuffer;
+use crate::CallbackScope;
 use crate::Context;
+use crate::ContextScope;
 use crate::Exception;
+use crate::Global;
 use crate::HandleScope;
 use crate::Isolate;
 use crate::Local;
@@ -10,12 +13,13 @@ use crate::String;
 use crate::Value;
 use crate::WasmModuleObject;
 
+use std::alloc::Layout;
 use std::alloc::alloc;
 use std::alloc::dealloc;
 use std::alloc::realloc;
-use std::alloc::Layout;
 use std::mem::MaybeUninit;
 use std::ptr::addr_of;
+use std::sync::atomic::AtomicUsize;
 
 use crate::support::CxxVTable;
 use crate::support::FieldOffset;
@@ -31,146 +35,163 @@ pub struct CxxValueSerializerDelegate {
   _cxx_vtable: CxxVTable,
 }
 
-#[no_mangle]
-pub unsafe extern "C" fn v8__ValueSerializer__Delegate__ThrowDataCloneError(
-  this: &mut CxxValueSerializerDelegate,
+#[unsafe(no_mangle)]
+unsafe extern "C" fn v8__ValueSerializer__Delegate__ThrowDataCloneError(
+  this: &CxxValueSerializerDelegate,
   message: Local<String>,
 ) {
-  let value_serializer_heap = ValueSerializerHeap::dispatch_mut(this);
-  let scope =
-    &mut crate::scope::CallbackScope::new(value_serializer_heap.context);
+  let value_serializer_heap = unsafe { ValueSerializerHeap::dispatch(this) };
+  let scope = unsafe {
+    &mut CallbackScope::new(value_serializer_heap.isolate_ptr.as_mut().unwrap())
+  };
+  let context = Local::new(scope, &value_serializer_heap.context);
+  let scope = &mut ContextScope::new(scope, context);
   value_serializer_heap
     .value_serializer_impl
-    .as_mut()
-    .throw_data_clone_error(scope, message)
+    .throw_data_clone_error(scope, message);
 }
 
-#[no_mangle]
-pub unsafe extern "C" fn v8__ValueSerializer__Delegate__HasCustomHostObject(
-  this: &mut CxxValueSerializerDelegate,
+#[unsafe(no_mangle)]
+unsafe extern "C" fn v8__ValueSerializer__Delegate__HasCustomHostObject(
+  this: &CxxValueSerializerDelegate,
   isolate: *mut Isolate,
 ) -> bool {
-  let value_serializer_heap = ValueSerializerHeap::dispatch_mut(this);
+  let value_serializer_heap = unsafe { ValueSerializerHeap::dispatch(this) };
   value_serializer_heap
     .value_serializer_impl
-    .as_mut()
-    .has_custom_host_object(&mut *isolate)
+    .has_custom_host_object(unsafe { &mut *isolate })
 }
 
-#[no_mangle]
-pub unsafe extern "C" fn v8__ValueSerializer__Delegate__IsHostObject(
-  this: &mut CxxValueSerializerDelegate,
-  _isolate: *mut Isolate,
+#[unsafe(no_mangle)]
+unsafe extern "C" fn v8__ValueSerializer__Delegate__IsHostObject(
+  this: &CxxValueSerializerDelegate,
+  isolate: *mut Isolate,
   object: Local<Object>,
 ) -> MaybeBool {
-  let value_serializer_heap = ValueSerializerHeap::dispatch_mut(this);
-  let scope =
-    &mut crate::scope::CallbackScope::new(value_serializer_heap.context);
-  let value_serializer_impl =
-    value_serializer_heap.value_serializer_impl.as_mut();
-  MaybeBool::from(value_serializer_impl.is_host_object(scope, object))
+  let value_serializer_heap = unsafe { ValueSerializerHeap::dispatch(this) };
+  let scope = unsafe { &mut CallbackScope::new(isolate.as_mut().unwrap()) };
+  let context = Local::new(scope, &value_serializer_heap.context);
+  let scope = &mut ContextScope::new(scope, context);
+
+  MaybeBool::from(
+    value_serializer_heap
+      .value_serializer_impl
+      .is_host_object(scope, object),
+  )
 }
 
-#[no_mangle]
-pub unsafe extern "C" fn v8__ValueSerializer__Delegate__WriteHostObject(
-  this: &mut CxxValueSerializerDelegate,
-  _isolate: *mut Isolate,
+#[unsafe(no_mangle)]
+unsafe extern "C" fn v8__ValueSerializer__Delegate__WriteHostObject(
+  this: &CxxValueSerializerDelegate,
+  isolate: *mut Isolate,
   object: Local<Object>,
 ) -> MaybeBool {
-  let value_serializer_heap = ValueSerializerHeap::dispatch_mut(this);
-  let scope =
-    &mut crate::scope::CallbackScope::new(value_serializer_heap.context);
+  let value_serializer_heap = unsafe { ValueSerializerHeap::dispatch(this) };
+  let scope = unsafe { &mut CallbackScope::new(isolate.as_mut().unwrap()) };
+  let context = Local::new(scope, &value_serializer_heap.context);
+  let scope = &mut ContextScope::new(scope, context);
   let value_serializer_impl =
-    value_serializer_heap.value_serializer_impl.as_mut();
+    value_serializer_heap.value_serializer_impl.as_ref();
   MaybeBool::from(value_serializer_impl.write_host_object(
     scope,
     object,
-    &mut value_serializer_heap.cxx_value_serializer,
+    &value_serializer_heap.cxx_value_serializer,
   ))
 }
 
-#[no_mangle]
-pub unsafe extern "C" fn v8__ValueSerializer__Delegate__GetSharedArrayBufferId(
-  this: &mut CxxValueSerializerDelegate,
-  _isolate: *mut Isolate,
+#[unsafe(no_mangle)]
+unsafe extern "C" fn v8__ValueSerializer__Delegate__GetSharedArrayBufferId(
+  this: &CxxValueSerializerDelegate,
+  isolate: *mut Isolate,
   shared_array_buffer: Local<SharedArrayBuffer>,
   clone_id: *mut u32,
 ) -> bool {
-  let value_serializer_heap = ValueSerializerHeap::dispatch_mut(this);
-  let scope =
-    &mut crate::scope::CallbackScope::new(value_serializer_heap.context);
+  let value_serializer_heap = unsafe { ValueSerializerHeap::dispatch(this) };
+  let scope = unsafe { &mut CallbackScope::new(isolate.as_mut().unwrap()) };
+  let context = Local::new(scope, &value_serializer_heap.context);
+  let scope = &mut ContextScope::new(scope, context);
   match value_serializer_heap
     .value_serializer_impl
-    .as_mut()
     .get_shared_array_buffer_id(scope, shared_array_buffer)
   {
     Some(x) => {
-      *clone_id = x;
+      unsafe {
+        *clone_id = x;
+      }
       true
     }
     None => false,
   }
 }
 
-#[no_mangle]
-pub unsafe extern "C" fn v8__ValueSerializer__Delegate__GetWasmModuleTransferId(
-  this: &mut CxxValueSerializerDelegate,
-  _isolate: *mut Isolate,
+#[unsafe(no_mangle)]
+unsafe extern "C" fn v8__ValueSerializer__Delegate__GetWasmModuleTransferId(
+  this: &CxxValueSerializerDelegate,
+  isolate: *mut Isolate,
   module: Local<WasmModuleObject>,
   transfer_id: *mut u32,
 ) -> bool {
-  let value_serializer_heap = ValueSerializerHeap::dispatch_mut(this);
-  let scope =
-    &mut crate::scope::CallbackScope::new(value_serializer_heap.context);
+  let value_serializer_heap = unsafe { ValueSerializerHeap::dispatch(this) };
+  let scope = unsafe { &mut CallbackScope::new(isolate.as_mut().unwrap()) };
+  let context = Local::new(scope, value_serializer_heap.context.clone());
+  let scope = &mut ContextScope::new(scope, context);
   match value_serializer_heap
     .value_serializer_impl
-    .as_mut()
     .get_wasm_module_transfer_id(scope, module)
   {
     Some(x) => {
-      *transfer_id = x;
+      unsafe {
+        *transfer_id = x;
+      }
       true
     }
     None => false,
   }
 }
 
-#[no_mangle]
-pub unsafe extern "C" fn v8__ValueSerializer__Delegate__ReallocateBufferMemory(
-  this: &mut CxxValueSerializerDelegate,
+#[unsafe(no_mangle)]
+unsafe extern "C" fn v8__ValueSerializer__Delegate__ReallocateBufferMemory(
+  this: &CxxValueSerializerDelegate,
   old_buffer: *mut c_void,
   size: usize,
   actual_size: *mut usize,
 ) -> *mut c_void {
-  let base = ValueSerializerHeap::dispatch_mut(this);
+  let base = unsafe { ValueSerializerHeap::dispatch(this) };
 
+  let buffer_size = base
+    .buffer_size
+    .swap(size, std::sync::atomic::Ordering::Release);
   let new_buffer = if old_buffer.is_null() {
     let layout = Layout::from_size_align(size, 1).unwrap();
-    alloc(layout)
+    unsafe { alloc(layout) }
   } else {
-    let old_layout = Layout::from_size_align(base.buffer_size, 1).unwrap();
-    realloc(old_buffer as *mut _, old_layout, size)
+    let old_layout = Layout::from_size_align(buffer_size, 1).unwrap();
+    unsafe { realloc(old_buffer as *mut _, old_layout, size) }
   };
 
-  base.buffer_size = size;
-
-  *actual_size = size;
+  unsafe {
+    *actual_size = size;
+  }
   new_buffer as *mut c_void
 }
 
-#[no_mangle]
-pub unsafe extern "C" fn v8__ValueSerializer__Delegate__FreeBufferMemory(
+#[unsafe(no_mangle)]
+unsafe extern "C" fn v8__ValueSerializer__Delegate__FreeBufferMemory(
   this: &mut CxxValueSerializerDelegate,
   buffer: *mut c_void,
 ) {
-  let base = ValueSerializerHeap::dispatch_mut(this);
+  let base = unsafe { ValueSerializerHeap::dispatch(this) };
   if !buffer.is_null() {
-    let layout = Layout::from_size_align(base.buffer_size, 1).unwrap();
-    dealloc(buffer as *mut _, layout)
+    let layout = Layout::from_size_align(
+      base.buffer_size.load(std::sync::atomic::Ordering::Relaxed),
+      1,
+    )
+    .unwrap();
+    unsafe { dealloc(buffer as *mut _, layout) };
   };
 }
 
-extern "C" {
+unsafe extern "C" {
   fn v8__ValueSerializer__Delegate__CONSTRUCT(
     buf: *mut MaybeUninit<CxxValueSerializerDelegate>,
   );
@@ -182,7 +203,7 @@ pub struct CxxValueSerializer {
   _cxx_vtable: CxxVTable,
 }
 
-extern "C" {
+unsafe extern "C" {
   fn v8__ValueSerializer__CONSTRUCT(
     buf: *mut MaybeUninit<CxxValueSerializer>,
     isolate: *mut Isolate,
@@ -226,23 +247,27 @@ extern "C" {
     source: *const c_void,
     length: usize,
   );
+  fn v8__ValueSerializer__SetTreatArrayBufferViewsAsHostObjects(
+    this: *mut CxxValueSerializer,
+    mode: bool,
+  );
 }
 
 /// The ValueSerializerImpl trait allows for
 /// custom callback functions used by v8.
 pub trait ValueSerializerImpl {
   fn throw_data_clone_error<'s>(
-    &mut self,
+    &self,
     scope: &mut HandleScope<'s>,
     message: Local<'s, String>,
   );
 
-  fn has_custom_host_object(&mut self, _isolate: &mut Isolate) -> bool {
+  fn has_custom_host_object(&self, _isolate: &mut Isolate) -> bool {
     false
   }
 
   fn is_host_object<'s>(
-    &mut self,
+    &self,
     scope: &mut HandleScope<'s>,
     _object: Local<'s, Object>,
   ) -> Option<bool> {
@@ -255,10 +280,10 @@ pub trait ValueSerializerImpl {
   }
 
   fn write_host_object<'s>(
-    &mut self,
+    &self,
     scope: &mut HandleScope<'s>,
     _object: Local<'s, Object>,
-    _value_serializer: &mut dyn ValueSerializerHelper,
+    _value_serializer: &dyn ValueSerializerHelper,
   ) -> Option<bool> {
     let msg =
       String::new(scope, "Deno serializer: write_host_object not implemented")
@@ -269,7 +294,7 @@ pub trait ValueSerializerImpl {
   }
 
   fn get_shared_array_buffer_id<'s>(
-    &mut self,
+    &self,
     _scope: &mut HandleScope<'s>,
     _shared_array_buffer: Local<'s, SharedArrayBuffer>,
   ) -> Option<u32> {
@@ -277,7 +302,7 @@ pub trait ValueSerializerImpl {
   }
 
   fn get_wasm_module_transfer_id(
-    &mut self,
+    &self,
     scope: &mut HandleScope<'_>,
     _module: Local<WasmModuleObject>,
   ) -> Option<u32> {
@@ -299,17 +324,18 @@ pub trait ValueSerializerImpl {
 /// to fail. Additionally the serializer and implementation are also pinned
 /// in memory because these have to be accessable from within the delegate
 /// callback methods.
-pub struct ValueSerializerHeap<'a, 's> {
+pub struct ValueSerializerHeap<'a> {
   value_serializer_impl: Box<dyn ValueSerializerImpl + 'a>,
   cxx_value_serializer_delegate: CxxValueSerializerDelegate,
   cxx_value_serializer: CxxValueSerializer,
-  buffer_size: usize,
-  context: Local<'s, Context>,
+  buffer_size: AtomicUsize,
+  context: Global<Context>,
+  isolate_ptr: *mut Isolate,
 }
 
-impl<'a, 's> ValueSerializerHeap<'a, 's> {
-  fn get_cxx_value_serializer_delegate_offset(
-  ) -> FieldOffset<CxxValueSerializerDelegate> {
+impl ValueSerializerHeap<'_> {
+  fn get_cxx_value_serializer_delegate_offset()
+  -> FieldOffset<CxxValueSerializerDelegate> {
     let buf = std::mem::MaybeUninit::<Self>::uninit();
     let delegate =
       unsafe { addr_of!((*buf.as_ptr()).cxx_value_serializer_delegate) };
@@ -317,50 +343,48 @@ impl<'a, 's> ValueSerializerHeap<'a, 's> {
   }
 
   /// Starting from 'this' pointer a ValueSerializerHeap ref can be created
-  #[allow(dead_code)]
   pub unsafe fn dispatch(
-    value_serializer_delegate: &'s CxxValueSerializerDelegate,
+    value_serializer_delegate: &CxxValueSerializerDelegate,
   ) -> &Self {
-    Self::get_cxx_value_serializer_delegate_offset()
-      .to_embedder::<Self>(value_serializer_delegate)
-  }
-
-  /// Starting from 'this' pointer the ValueSerializerHeap mut ref can be
-  /// created
-  pub unsafe fn dispatch_mut(
-    value_serializer_delegate: &'s mut CxxValueSerializerDelegate,
-  ) -> &mut Self {
-    Self::get_cxx_value_serializer_delegate_offset()
-      .to_embedder_mut::<Self>(value_serializer_delegate)
+    unsafe {
+      Self::get_cxx_value_serializer_delegate_offset()
+        .to_embedder::<Self>(value_serializer_delegate)
+    }
   }
 }
 
-impl<'a, 's> Drop for ValueSerializerHeap<'a, 's> {
+impl Drop for ValueSerializerHeap<'_> {
   fn drop(&mut self) {
     unsafe { v8__ValueSerializer__DESTRUCT(&mut self.cxx_value_serializer) };
   }
+}
+
+fn cast_to_ptr<T>(x: &T) -> *mut T {
+  x as *const T as *mut T
 }
 
 /// Trait used for direct write to the serialization buffer.
 /// Mostly used by the write_host_object callback function in the
 /// ValueSerializerImpl trait to create custom serialization logic.
 pub trait ValueSerializerHelper {
-  fn get_cxx_value_serializer(&mut self) -> &mut CxxValueSerializer;
+  fn get_cxx_value_serializer(&self) -> &CxxValueSerializer;
 
-  fn write_header(&mut self) {
+  fn write_header(&self) {
     unsafe {
-      v8__ValueSerializer__WriteHeader(self.get_cxx_value_serializer())
+      v8__ValueSerializer__WriteHeader(cast_to_ptr(
+        self.get_cxx_value_serializer(),
+      ));
     };
   }
 
   fn write_value(
-    &mut self,
+    &self,
     context: Local<Context>,
     value: Local<Value>,
   ) -> Option<bool> {
     unsafe {
       v8__ValueSerializer__WriteValue(
-        self.get_cxx_value_serializer(),
+        cast_to_ptr(self.get_cxx_value_serializer()),
         context,
         value,
       )
@@ -368,69 +392,90 @@ pub trait ValueSerializerHelper {
     .into()
   }
 
-  fn write_uint32(&mut self, value: u32) {
+  fn write_uint32(&self, value: u32) {
     unsafe {
-      v8__ValueSerializer__WriteUint32(self.get_cxx_value_serializer(), value)
+      v8__ValueSerializer__WriteUint32(
+        cast_to_ptr(self.get_cxx_value_serializer()),
+        value,
+      );
     };
   }
 
-  fn write_uint64(&mut self, value: u64) {
+  fn write_uint64(&self, value: u64) {
     unsafe {
-      v8__ValueSerializer__WriteUint64(self.get_cxx_value_serializer(), value)
+      v8__ValueSerializer__WriteUint64(
+        cast_to_ptr(self.get_cxx_value_serializer()),
+        value,
+      );
     };
   }
 
-  fn write_double(&mut self, value: f64) {
+  fn write_double(&self, value: f64) {
     unsafe {
-      v8__ValueSerializer__WriteDouble(self.get_cxx_value_serializer(), value)
+      v8__ValueSerializer__WriteDouble(
+        cast_to_ptr(self.get_cxx_value_serializer()),
+        value,
+      );
     };
   }
 
-  fn write_raw_bytes(&mut self, source: &[u8]) {
+  fn write_raw_bytes(&self, source: &[u8]) {
     unsafe {
       v8__ValueSerializer__WriteRawBytes(
-        self.get_cxx_value_serializer(),
+        cast_to_ptr(self.get_cxx_value_serializer()),
         source.as_ptr() as *const _,
         source.len(),
-      )
+      );
     };
   }
 
   fn transfer_array_buffer(
-    &mut self,
+    &self,
     transfer_id: u32,
     array_buffer: Local<ArrayBuffer>,
   ) {
     unsafe {
       v8__ValueSerializer__TransferArrayBuffer(
-        self.get_cxx_value_serializer(),
+        cast_to_ptr(self.get_cxx_value_serializer()),
         transfer_id,
         array_buffer,
-      )
+      );
+    };
+  }
+
+  fn set_treat_array_buffer_views_as_host_objects(&self, mode: bool) {
+    unsafe {
+      v8__ValueSerializer__SetTreatArrayBufferViewsAsHostObjects(
+        cast_to_ptr(self.get_cxx_value_serializer()),
+        mode,
+      );
     };
   }
 }
 
 impl ValueSerializerHelper for CxxValueSerializer {
-  fn get_cxx_value_serializer(&mut self) -> &mut CxxValueSerializer {
+  fn get_cxx_value_serializer(&self) -> &CxxValueSerializer {
     self
   }
 }
 
-impl<'a, 's> ValueSerializerHelper for ValueSerializerHeap<'a, 's> {
-  fn get_cxx_value_serializer(&mut self) -> &mut CxxValueSerializer {
-    &mut self.cxx_value_serializer
+impl ValueSerializerHelper for ValueSerializerHeap<'_> {
+  fn get_cxx_value_serializer(&self) -> &CxxValueSerializer {
+    &self.cxx_value_serializer
   }
 }
 
-impl<'a, 's> ValueSerializerHelper for ValueSerializer<'a, 's> {
-  fn get_cxx_value_serializer(&mut self) -> &mut CxxValueSerializer {
-    &mut self.value_serializer_heap.cxx_value_serializer
+impl ValueSerializerHelper for ValueSerializer<'_> {
+  fn get_cxx_value_serializer(&self) -> &CxxValueSerializer {
+    &self.value_serializer_heap.cxx_value_serializer
   }
 }
 
-pub struct ValueSerializer<'a, 's> {
-  value_serializer_heap: Pin<Box<ValueSerializerHeap<'a, 's>>>,
+pub struct ValueSerializer<'a> {
+  value_serializer_heap: Pin<Box<ValueSerializerHeap<'a>>>,
+  // ValueSerializerHeap is already !Send and !Sync
+  // but this is just making it explicit
+  _phantom: std::marker::PhantomData<*mut ()>,
 }
 
 /// ValueSerializer is a stack object used as entry-point for an owned and
@@ -438,62 +483,83 @@ pub struct ValueSerializer<'a, 's> {
 /// The 'a lifetime is the lifetime of the ValueSerializerImpl implementation.
 /// The 's lifetime is the lifetime of the HandleScope which is used to retrieve
 /// a Local<'s, Context> for the CallbackScopes
-impl<'a, 's> ValueSerializer<'a, 's> {
+impl<'a> ValueSerializer<'a> {
   pub fn new<D: ValueSerializerImpl + 'a>(
-    scope: &mut HandleScope<'s>,
+    scope: &mut HandleScope,
     value_serializer_impl: Box<D>,
   ) -> Self {
+    let context = scope.get_current_context();
     // create dummy ValueSerializerHeap 'a, and move to heap + pin to address
-    let mut value_serializer_heap = Box::pin(ValueSerializerHeap {
-      value_serializer_impl,
-      cxx_value_serializer: CxxValueSerializer {
-        _cxx_vtable: CxxVTable(std::ptr::null()),
-      },
-      cxx_value_serializer_delegate: CxxValueSerializerDelegate {
-        _cxx_vtable: CxxVTable(std::ptr::null()),
-      },
-      buffer_size: 0,
-      context: scope.get_current_context(),
-    });
+    let value_serializer_heap_ptr =
+      Box::into_raw(Box::new(ValueSerializerHeap {
+        value_serializer_impl,
+        cxx_value_serializer: CxxValueSerializer {
+          _cxx_vtable: CxxVTable(std::ptr::null()),
+        },
+        cxx_value_serializer_delegate: CxxValueSerializerDelegate {
+          _cxx_vtable: CxxVTable(std::ptr::null()),
+        },
+        buffer_size: AtomicUsize::new(0),
+        context: Global::new(scope, context),
+        isolate_ptr: scope.get_isolate_ptr(),
+      }));
 
     unsafe {
+      let delegate_ptr = std::ptr::addr_of_mut!(
+        (*value_serializer_heap_ptr).cxx_value_serializer_delegate
+      );
+      let serializer_ptr = std::ptr::addr_of_mut!(
+        (*value_serializer_heap_ptr).cxx_value_serializer
+      );
       v8__ValueSerializer__Delegate__CONSTRUCT(
-        &mut value_serializer_heap.cxx_value_serializer_delegate
-          as *mut CxxValueSerializerDelegate
-          as *mut std::mem::MaybeUninit<CxxValueSerializerDelegate>,
+        delegate_ptr
+          .cast::<std::mem::MaybeUninit<CxxValueSerializerDelegate>>(),
       );
 
       v8__ValueSerializer__CONSTRUCT(
-        &mut value_serializer_heap.cxx_value_serializer
-          as *mut CxxValueSerializer
-          as *mut std::mem::MaybeUninit<CxxValueSerializer>,
+        serializer_ptr.cast::<std::mem::MaybeUninit<CxxValueSerializer>>(),
         scope.get_isolate_ptr(),
-        &mut value_serializer_heap.cxx_value_serializer_delegate,
+        delegate_ptr,
       );
     };
 
+    // SAFETY: pointer from `Box::into_raw` is valid
+    let value_serializer_heap =
+      Pin::new(unsafe { Box::from_raw(value_serializer_heap_ptr) });
+
     Self {
       value_serializer_heap,
+      _phantom: std::marker::PhantomData,
     }
   }
 }
 
-impl<'a, 's> ValueSerializer<'a, 's> {
-  pub fn release(mut self) -> Vec<u8> {
+impl ValueSerializer<'_> {
+  pub fn release(&self) -> Vec<u8> {
     unsafe {
       let mut size: usize = 0;
       let mut ptr: *mut u8 = &mut 0;
       v8__ValueSerializer__Release(
-        &mut self.value_serializer_heap.cxx_value_serializer,
+        cast_to_ptr(self.get_cxx_value_serializer()),
         &mut ptr,
         &mut size,
       );
-      Vec::from_raw_parts(ptr, size, self.value_serializer_heap.buffer_size)
+      let capacity = self
+        .value_serializer_heap
+        .buffer_size
+        .swap(0, std::sync::atomic::Ordering::Relaxed);
+      if ptr.is_null() {
+        return Vec::new();
+      }
+      assert!(size <= capacity);
+      // SAFETY: ptr is non-null, was allocated by us in `v8__ValueSerializer__Delegate__ReallocateBufferMemory`, and
+      // the capacity is correctly updated during reallocation. Size is asserted to be valid above.
+      Vec::from_raw_parts(ptr, size, capacity)
     }
   }
 
   pub fn write_value(
-    &mut self,
+    &self,
     context: Local<Context>,
     value: Local<Value>,
   ) -> Option<bool> {

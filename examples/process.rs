@@ -13,7 +13,7 @@ fn log_callback(
     .unwrap()
     .to_rust_string_lossy(scope);
 
-  println!("Logged: {}", message);
+  println!("Logged: {message}");
 }
 
 fn main() {
@@ -32,7 +32,7 @@ fn main() {
   let mut scope = v8::HandleScope::new(&mut isolate);
 
   let source = std::fs::read_to_string(&file)
-    .unwrap_or_else(|err| panic!("failed to open {}: {}", file, err));
+    .unwrap_or_else(|err| panic!("failed to open {file}: {err}"));
   let source = v8::String::new(&mut scope, &source).unwrap();
 
   let mut processor = JsHttpRequestProcessor::new(&mut scope, source, options);
@@ -148,7 +148,13 @@ where
       v8::FunctionTemplate::new(isolate_scope, log_callback).into(),
     );
 
-    let context = v8::Context::new_from_template(isolate_scope, global);
+    let context = v8::Context::new(
+      isolate_scope,
+      v8::ContextOptions {
+        global_template: Some(global),
+        ..Default::default()
+      },
+    );
     let mut context_scope = v8::ContextScope::new(isolate_scope, context);
 
     let request_template = v8::ObjectTemplate::new(&mut context_scope);
@@ -217,7 +223,7 @@ where
         .unwrap()
         .to_rust_string_lossy(try_catch);
 
-      panic!("{}", exception_string);
+      panic!("{exception_string}");
     }
   }
 
@@ -245,7 +251,7 @@ where
         .unwrap()
         .to_rust_string_lossy(try_catch);
 
-      panic!("{}", exception_string);
+      panic!("{exception_string}");
     }
   }
 
@@ -324,8 +330,10 @@ where
     scope: &mut v8::HandleScope,
     request: v8::Local<v8::Object>,
   ) -> *mut Box<dyn HttpRequest> {
-    let external = request.get_internal_field(scope, 0).unwrap();
-    let external = unsafe { v8::Local::<v8::External>::cast(external) };
+    let external = request
+      .get_internal_field(scope, 0)
+      .unwrap()
+      .cast::<v8::External>();
     external.value() as *mut Box<dyn HttpRequest>
   }
 
@@ -368,7 +376,7 @@ where
       let key = key.to_string(scope).unwrap().to_rust_string_lossy(scope);
       let value = value.to_string(scope).unwrap().to_rust_string_lossy(scope);
 
-      println!("{}: {}", key, value);
+      println!("{key}: {value}");
     }
   }
 }

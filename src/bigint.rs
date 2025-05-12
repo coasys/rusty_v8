@@ -1,13 +1,13 @@
-use crate::support::int;
 use crate::BigInt;
 use crate::Context;
 use crate::HandleScope;
 use crate::Isolate;
 use crate::Local;
+use crate::support::int;
 
 use std::mem::MaybeUninit;
 
-extern "C" {
+unsafe extern "C" {
   fn v8__BigInt__New(isolate: *mut Isolate, value: i64) -> *const BigInt;
   fn v8__BigInt__NewFromUnsigned(
     isolate: *mut Isolate,
@@ -124,7 +124,7 @@ impl BigInt {
         sign_bit.as_mut_ptr(),
         &mut word_count,
         words.as_mut_ptr(),
-      )
+      );
     }
 
     let sign_bit = unsafe { sign_bit.assume_init() };

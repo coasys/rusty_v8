@@ -1,7 +1,3 @@
-use std::num::NonZeroI32;
-
-use crate::support::int;
-use crate::support::Maybe;
 use crate::BigInt;
 use crate::Boolean;
 use crate::Context;
@@ -15,8 +11,9 @@ use crate::Object;
 use crate::String;
 use crate::Uint32;
 use crate::Value;
+use crate::support::Maybe;
 
-extern "C" {
+unsafe extern "C" {
   fn v8__Value__IsUndefined(this: *const Value) -> bool;
   fn v8__Value__IsNull(this: *const Value) -> bool;
   fn v8__Value__IsNullOrUndefined(this: *const Value) -> bool;
@@ -141,8 +138,8 @@ extern "C" {
     out: *mut Maybe<i32>,
   );
   fn v8__Value__BooleanValue(this: *const Value, isolate: *mut Isolate)
-    -> bool;
-  fn v8__Value__GetHash(this: *const Value) -> int;
+  -> bool;
+  fn v8__Value__GetHash(this: *const Value) -> u32;
   fn v8__Value__TypeOf(
     this: *const Value,
     isolate: *mut Isolate,
@@ -667,7 +664,7 @@ impl Value {
   pub fn number_value(&self, scope: &mut HandleScope) -> Option<f64> {
     let mut out = Maybe::<f64>::default();
     unsafe {
-      v8__Value__NumberValue(self, &*scope.get_current_context(), &mut out)
+      v8__Value__NumberValue(self, &*scope.get_current_context(), &mut out);
     };
     out.into()
   }
@@ -676,7 +673,7 @@ impl Value {
   pub fn integer_value(&self, scope: &mut HandleScope) -> Option<i64> {
     let mut out = Maybe::<i64>::default();
     unsafe {
-      v8__Value__IntegerValue(self, &*scope.get_current_context(), &mut out)
+      v8__Value__IntegerValue(self, &*scope.get_current_context(), &mut out);
     };
     out.into()
   }
@@ -685,7 +682,7 @@ impl Value {
   pub fn uint32_value(&self, scope: &mut HandleScope) -> Option<u32> {
     let mut out = Maybe::<u32>::default();
     unsafe {
-      v8__Value__Uint32Value(self, &*scope.get_current_context(), &mut out)
+      v8__Value__Uint32Value(self, &*scope.get_current_context(), &mut out);
     };
     out.into()
   }
@@ -694,7 +691,7 @@ impl Value {
   pub fn int32_value(&self, scope: &mut HandleScope) -> Option<i32> {
     let mut out = Maybe::<i32>::default();
     unsafe {
-      v8__Value__Int32Value(self, &*scope.get_current_context(), &mut out)
+      v8__Value__Int32Value(self, &*scope.get_current_context(), &mut out);
     };
     out.into()
   }
@@ -704,14 +701,13 @@ impl Value {
     unsafe { v8__Value__BooleanValue(self, scope.get_isolate_ptr()) }
   }
 
-  /// Returns the V8 hash value for this value. The current implementation
-  /// uses a hidden property to store the identity hash on some object types.
-  ///
-  /// The return value will never be 0. Also, it is not guaranteed to be
-  /// unique.
+  /// Get the hash of this value. The hash is not guaranteed to be
+  /// unique. For |Object| and |Name| instances the result is equal to
+  /// |GetIdentityHash|. Hashes are not guaranteed to be stable across
+  /// different isolates or processes.
   #[inline(always)]
-  pub fn get_hash(&self) -> NonZeroI32 {
-    unsafe { NonZeroI32::new_unchecked(v8__Value__GetHash(self)) }
+  pub fn get_hash(&self) -> u32 {
+    unsafe { v8__Value__GetHash(self) }
   }
 
   #[inline(always)]

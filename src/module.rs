@@ -2,12 +2,6 @@ use std::mem::MaybeUninit;
 use std::num::NonZeroI32;
 use std::ptr::null;
 
-use crate::support::int;
-use crate::support::MapFnFrom;
-use crate::support::MapFnTo;
-use crate::support::MaybeBool;
-use crate::support::ToCFn;
-use crate::support::UnitType;
 use crate::Context;
 use crate::FixedArray;
 use crate::HandleScope;
@@ -16,12 +10,19 @@ use crate::Local;
 use crate::Message;
 use crate::Module;
 use crate::ModuleRequest;
+use crate::Object;
 use crate::String;
 use crate::UnboundModuleScript;
 use crate::Value;
+use crate::support::MapFnFrom;
+use crate::support::MapFnTo;
+use crate::support::MaybeBool;
+use crate::support::ToCFn;
+use crate::support::UnitType;
+use crate::support::int;
 
 /// Called during Module::instantiate_module. Provided with arguments:
-/// (context, specifier, import_assertions, referrer). Return None on error.
+/// (context, specifier, import_attributes, referrer). Return None on error.
 ///
 /// Note: this callback has an unusual signature due to ABI incompatibilities
 /// between Rust and C++. However end users can implement the callback as
@@ -31,36 +32,37 @@ use crate::Value;
 ///   fn my_resolve_callback<'a>(
 ///      context: v8::Local<'a, v8::Context>,
 ///      specifier: v8::Local<'a, v8::String>,
-///      import_assertions: v8::Local<'a, v8::FixedArray>,
+///      import_attributes: v8::Local<'a, v8::FixedArray>,
 ///      referrer: v8::Local<'a, v8::Module>,
 ///   ) -> Option<v8::Local<'a, v8::Module>> {
 ///      // ...
 ///      Some(resolved_module)
 ///   }
 /// ```
-
-// System V ABI
 #[cfg(not(target_os = "windows"))]
 #[repr(C)]
+// System V ABI
 pub struct ResolveModuleCallbackRet(*const Module);
 
 #[cfg(not(target_os = "windows"))]
-pub type ResolveModuleCallback<'a> = extern "C" fn(
-  Local<'a, Context>,
-  Local<'a, String>,
-  Local<'a, FixedArray>,
-  Local<'a, Module>,
-) -> ResolveModuleCallbackRet;
+pub type ResolveModuleCallback<'a> =
+  unsafe extern "C" fn(
+    Local<'a, Context>,
+    Local<'a, String>,
+    Local<'a, FixedArray>,
+    Local<'a, Module>,
+  ) -> ResolveModuleCallbackRet;
 
 // Windows x64 ABI: Local<Module> returned on the stack.
 #[cfg(target_os = "windows")]
-pub type ResolveModuleCallback<'a> = extern "C" fn(
+pub type ResolveModuleCallback<'a> = unsafe extern "C" fn(
   *mut *const Module,
   Local<'a, Context>,
   Local<'a, String>,
   Local<'a, FixedArray>,
   Local<'a, Module>,
-) -> *mut *const Module;
+)
+  -> *mut *const Module;
 
 impl<'a, F> MapFnFrom<F> for ResolveModuleCallback<'a>
 where
@@ -74,9 +76,9 @@ where
 {
   #[cfg(not(target_os = "windows"))]
   fn mapping() -> Self {
-    let f = |context, specifier, import_assertions, referrer| {
+    let f = |context, specifier, import_attributes, referrer| {
       ResolveModuleCallbackRet(
-        (F::get())(context, specifier, import_assertions, referrer)
+        (F::get())(context, specifier, import_attributes, referrer)
           .map(|r| -> *const Module { &*r })
           .unwrap_or(null()),
       )
@@ -86,8 +88,8 @@ where
 
   #[cfg(target_os = "windows")]
   fn mapping() -> Self {
-    let f = |ret_ptr, context, specifier, import_assertions, referrer| {
-      let r = (F::get())(context, specifier, import_assertions, referrer)
+    let f = |ret_ptr, context, specifier, import_attributes, referrer| {
+      let r = (F::get())(context, specifier, import_attributes, referrer)
         .map(|r| -> *const Module { &*r })
         .unwrap_or(null());
       unsafe { std::ptr::write(ret_ptr, r) }; // Write result to stack.
@@ -104,7 +106,7 @@ pub struct SyntheticModuleEvaluationStepsRet(*const Value);
 
 #[cfg(not(target_os = "windows"))]
 pub type SyntheticModuleEvaluationSteps<'a> =
-  extern "C" fn(
+  unsafe extern "C" fn(
     Local<'a, Context>,
     Local<'a, Module>,
   ) -> SyntheticModuleEvaluationStepsRet;
@@ -112,7 +114,7 @@ pub type SyntheticModuleEvaluationSteps<'a> =
 // Windows x64 ABI: Local<Value> returned on the stack.
 #[cfg(target_os = "windows")]
 pub type SyntheticModuleEvaluationSteps<'a> =
-  extern "C" fn(
+  unsafe extern "C" fn(
     *mut *const Value,
     Local<'a, Context>,
     Local<'a, Module>,
@@ -127,9 +129,7 @@ where
   fn mapping() -> Self {
     let f = |context, module| {
       SyntheticModuleEvaluationStepsRet(
-        (F::get())(context, module)
-          .map(|r| -> *const Value { &*r })
-          .unwrap_or(null()),
+        (F::get())(context, module).map_or(null(), |r| -> *const Value { &*r }),
       )
     };
     f.to_c_fn()
@@ -148,7 +148,67 @@ where
   }
 }
 
-extern "C" {
+// System V ABI
+#[cfg(not(target_os = "windows"))]
+#[repr(C)]
+pub struct ResolveSourceCallbackRet(*const Object);
+
+#[cfg(not(target_os = "windows"))]
+pub type ResolveSourceCallback<'a> =
+  unsafe extern "C" fn(
+    Local<'a, Context>,
+    Local<'a, String>,
+    Local<'a, FixedArray>,
+    Local<'a, Module>,
+  ) -> ResolveSourceCallbackRet;
+
+// Windows x64 ABI: Local<Module> returned on the stack.
+#[cfg(target_os = "windows")]
+pub type ResolveSourceCallback<'a> = unsafe extern "C" fn(
+  *mut *const Object,
+  Local<'a, Context>,
+  Local<'a, String>,
+  Local<'a, FixedArray>,
+  Local<'a, Module>,
+)
+  -> *mut *const Object;
+
+impl<'a, F> MapFnFrom<F> for ResolveSourceCallback<'a>
+where
+  F: UnitType
+    + Fn(
+      Local<'a, Context>,
+      Local<'a, String>,
+      Local<'a, FixedArray>,
+      Local<'a, Module>,
+    ) -> Option<Local<'a, Object>>,
+{
+  #[cfg(not(target_os = "windows"))]
+  fn mapping() -> Self {
+    let f = |context, specifier, import_attributes, referrer| {
+      ResolveSourceCallbackRet(
+        (F::get())(context, specifier, import_attributes, referrer)
+          .map(|r| -> *const Object { &*r })
+          .unwrap_or(null()),
+      )
+    };
+    f.to_c_fn()
+  }
+
+  #[cfg(target_os = "windows")]
+  fn mapping() -> Self {
+    let f = |ret_ptr, context, specifier, import_attributes, referrer| {
+      let r = (F::get())(context, specifier, import_attributes, referrer)
+        .map(|r| -> *const Object { &*r })
+        .unwrap_or(null());
+      unsafe { std::ptr::write(ret_ptr, r) }; // Write result to stack.
+      ret_ptr // Return stack pointer to the return value.
+    };
+    f.to_c_fn()
+  }
+}
+
+unsafe extern "C" {
   fn v8__Module__GetStatus(this: *const Module) -> ModuleStatus;
   fn v8__Module__GetException(this: *const Module) -> *const Value;
   fn v8__Module__GetModuleRequests(this: *const Module) -> *const FixedArray;
@@ -164,11 +224,13 @@ extern "C" {
     this: *const Module,
     context: *const Context,
     cb: ResolveModuleCallback,
+    source_callback: Option<ResolveSourceCallback>,
   ) -> MaybeBool;
   fn v8__Module__Evaluate(
     this: *const Module,
     context: *const Context,
   ) -> *const Value;
+  fn v8__Module__IsGraphAsync(this: *const Module) -> bool;
   fn v8__Module__IsSourceTextModule(this: *const Module) -> bool;
   fn v8__Module__IsSyntheticModule(this: *const Module) -> bool;
   fn v8__Module__CreateSyntheticModule(
@@ -312,8 +374,6 @@ impl Module {
   /// Returns an empty Maybe<bool> if an exception occurred during
   /// instantiation. (In the case where the callback throws an exception, that
   /// exception is propagated.)
-  ///
-  /// NOTE: requires to set `--harmony-import-assertions` V8 flag.
   #[must_use]
   #[inline(always)]
   pub fn instantiate_module<'a>(
@@ -326,6 +386,31 @@ impl Module {
         self,
         &*scope.get_current_context(),
         callback.map_fn_to(),
+        None,
+      )
+    }
+    .into()
+  }
+
+  /// Instantiates the module and its dependencies.
+  ///
+  /// Returns an empty Maybe<bool> if an exception occurred during
+  /// instantiation. (In the case where the callback throws an exception, that
+  /// exception is propagated.)
+  #[must_use]
+  #[inline(always)]
+  pub fn instantiate_module2<'a>(
+    &self,
+    scope: &mut HandleScope,
+    callback: impl MapFnTo<ResolveModuleCallback<'a>>,
+    source_callback: impl MapFnTo<ResolveSourceCallback<'a>>,
+  ) -> Option<bool> {
+    unsafe {
+      v8__Module__InstantiateModule(
+        self,
+        &*scope.get_current_context(),
+        callback.map_fn_to(),
+        Some(source_callback.map_fn_to()),
       )
     }
     .into()
@@ -347,6 +432,15 @@ impl Module {
       scope
         .cast_local(|sd| v8__Module__Evaluate(self, sd.get_current_context()))
     }
+  }
+
+  /// Returns whether this module or any of its requested modules is async,
+  /// i.e. contains top-level await.
+  ///
+  /// The module's status must be at least kInstantiated.
+  #[inline(always)]
+  pub fn is_graph_async(&self) -> bool {
+    unsafe { v8__Module__IsGraphAsync(self) }
   }
 
   /// Returns whether the module is a SourceTextModule.
@@ -496,11 +590,5 @@ impl ModuleRequest {
   pub fn get_import_attributes(&self) -> Local<FixedArray> {
     unsafe { Local::from_raw(v8__ModuleRequest__GetImportAttributes(self)) }
       .unwrap()
-  }
-
-  #[inline(always)]
-  #[deprecated(note = "Use get_import_attributes instead")]
-  pub fn get_import_assertions(&self) -> Local<FixedArray> {
-    self.get_import_attributes()
   }
 }

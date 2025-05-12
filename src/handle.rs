@@ -9,20 +9,20 @@ use std::mem::transmute;
 use std::ops::Deref;
 use std::ptr::NonNull;
 
-use crate::support::Opaque;
 use crate::Data;
 use crate::HandleScope;
 use crate::Isolate;
 use crate::IsolateHandle;
+use crate::support::Opaque;
 
-extern "C" {
+unsafe extern "C" {
   fn v8__Local__New(isolate: *mut Isolate, other: *const Data) -> *const Data;
   fn v8__Global__New(isolate: *mut Isolate, data: *const Data) -> *const Data;
   fn v8__Global__NewWeak(
     isolate: *mut Isolate,
     data: *const Data,
     parameter: *const c_void,
-    callback: extern "C" fn(*const WeakCallbackInfo),
+    callback: unsafe extern "C" fn(*const WeakCallbackInfo),
   ) -> *const Data;
   fn v8__Global__Reset(data: *const Data);
   fn v8__WeakCallbackInfo__GetIsolate(
@@ -33,8 +33,34 @@ extern "C" {
   ) -> *mut c_void;
   fn v8__WeakCallbackInfo__SetSecondPassCallback(
     this: *const WeakCallbackInfo,
-    callback: extern "C" fn(*const WeakCallbackInfo),
+    callback: unsafe extern "C" fn(*const WeakCallbackInfo),
   );
+
+  fn v8__TracedReference__CONSTRUCT(this: *mut TracedReference<Data>);
+  fn v8__TracedReference__DESTRUCT(this: *mut TracedReference<Data>);
+  fn v8__TracedReference__Reset(
+    this: *mut TracedReference<Data>,
+    isolate: *mut Isolate,
+    data: *mut Data,
+  );
+  fn v8__TracedReference__Get(
+    this: *const TracedReference<Data>,
+    isolate: *mut Isolate,
+  ) -> *const Data;
+
+  fn v8__Eternal__CONSTRUCT(this: *mut Eternal<Data>);
+  fn v8__Eternal__DESTRUCT(this: *mut Eternal<Data>);
+  fn v8__Eternal__Clear(this: *mut Eternal<Data>);
+  fn v8__Eternal__Get(
+    this: *const Eternal<Data>,
+    isolate: *mut Isolate,
+  ) -> *const Data;
+  fn v8__Eternal__Set(
+    this: *mut Eternal<Data>,
+    isolate: *mut Isolate,
+    data: *mut Data,
+  );
+  fn v8__Eternal__IsEmpty(this: *const Eternal<Data>) -> bool;
 }
 
 /// An object reference managed by the v8 garbage collector.
@@ -94,21 +120,24 @@ impl<'s, T> Local<'s, T> {
   /// Create a local handle by downcasting from one of its super types.
   /// This function is unsafe because the cast is unchecked.
   #[inline(always)]
-  pub unsafe fn cast<A>(other: Local<'s, A>) -> Self
+  pub unsafe fn cast_unchecked<A>(other: Local<'s, A>) -> Self
   where
-    Local<'s, A>: From<Self>,
+    Local<'s, A>: TryFrom<Self>,
   {
-    transmute(other)
+    unsafe { transmute(other) }
   }
 
   #[inline(always)]
   pub(crate) unsafe fn from_raw(ptr: *const T) -> Option<Self> {
-    NonNull::new(ptr as *mut _).map(|nn| Self::from_non_null(nn))
+    NonNull::new(ptr as *mut _).map(|nn| unsafe { Self::from_non_null(nn) })
   }
 
   #[inline(always)]
   pub(crate) unsafe fn from_raw_unchecked(ptr: *const T) -> Self {
-    Self(NonNull::new_unchecked(ptr as *mut _), PhantomData)
+    Self(
+      unsafe { NonNull::new_unchecked(ptr as *mut _) },
+      PhantomData,
+    )
   }
 
   #[inline(always)]
@@ -127,18 +156,60 @@ impl<'s, T> Local<'s, T> {
   }
 }
 
-impl<'s, T> Copy for Local<'s, T> {}
+impl<T> Copy for Local<'_, T> {}
 
-impl<'s, T> Clone for Local<'s, T> {
+impl<T> Clone for Local<'_, T> {
   fn clone(&self) -> Self {
     *self
   }
 }
 
-impl<'s, T> Deref for Local<'s, T> {
+impl<T> Deref for Local<'_, T> {
   type Target = T;
   fn deref(&self) -> &T {
     unsafe { self.0.as_ref() }
+  }
+}
+
+impl<'s, T> Local<'s, T> {
+  /// Attempts to cast the contained type to another,
+  /// returning an error if the conversion fails.
+  ///
+  /// # Examples
+  ///
+  /// ```ignore
+  /// let value: Local<'_, Value> = get_v8_value();
+  ///
+  /// if let Ok(func) = value.try_cast::<Function> {
+  ///   //
+  /// }
+  /// ```
+  #[inline(always)]
+  pub fn try_cast<A>(
+    self,
+  ) -> Result<Local<'s, A>, <Self as TryInto<Local<'s, A>>>::Error>
+  where
+    Self: TryInto<Local<'s, A>>,
+  {
+    self.try_into()
+  }
+
+  /// Attempts to cast the contained type to another,
+  /// panicking if the conversion fails.
+  ///
+  /// # Example
+  ///
+  /// ```ignore
+  /// let value: Local<'_, Value> = get_v8_value();
+  ///
+  /// let func = value.cast::<Function>();
+  /// ```
+  #[inline(always)]
+  pub fn cast<A>(self) -> Local<'s, A>
+  where
+    Self: TryInto<Local<'s, A>, Error: std::fmt::Debug>,
+  {
+    self.try_into().unwrap()
   }
 }
 
@@ -172,12 +243,14 @@ impl<T> Global<T> {
   #[inline(always)]
   unsafe fn new_raw(isolate: *mut Isolate, data: NonNull<T>) -> Self {
     let data = data.cast().as_ptr();
-    let data = v8__Global__New(isolate, data) as *const T;
-    let data = NonNull::new_unchecked(data as *mut _);
-    let isolate_handle = (*isolate).thread_safe_handle();
-    Self {
-      data,
-      isolate_handle,
+    unsafe {
+      let data = v8__Global__New(isolate, data) as *const T;
+      let data = NonNull::new_unchecked(data as *mut _);
+      let isolate_handle = (*isolate).thread_safe_handle();
+      Self {
+        data,
+        isolate_handle,
+      }
     }
   }
 
@@ -226,7 +299,7 @@ impl<T> Drop for Global<T> {
         // been disposed.
       } else {
         // Destroy the storage cell that contains the contents of this Global.
-        v8__Global__Reset(self.data.cast().as_ptr())
+        v8__Global__Reset(self.data.cast().as_ptr());
       }
     }
   }
@@ -295,11 +368,11 @@ pub trait Handle: Sized {
     if let HandleHost::DisposedIsolate = host {
       panic!("attempt to access Handle hosted by disposed Isolate");
     }
-    &*data.as_ptr()
+    unsafe { &*data.as_ptr() }
   }
 }
 
-impl<'s, T> Handle for Local<'s, T> {
+impl<T> Handle for Local<'_, T> {
   type Data = T;
   fn get_handle_info(&self) -> HandleInfo<T> {
     HandleInfo::new(self.as_non_null(), HandleHost::Scope)
@@ -320,14 +393,14 @@ impl<T> Handle for Global<T> {
   }
 }
 
-impl<'a, T> Handle for &'a Global<T> {
+impl<T> Handle for &Global<T> {
   type Data = T;
   fn get_handle_info(&self) -> HandleInfo<T> {
     HandleInfo::new(self.data, (&self.isolate_handle).into())
   }
 }
 
-impl<'a, T> Handle for UnsafeRefHandle<'a, T> {
+impl<T> Handle for UnsafeRefHandle<'_, T> {
   type Data = T;
   fn get_handle_info(&self) -> HandleInfo<T> {
     HandleInfo::new(
@@ -337,7 +410,7 @@ impl<'a, T> Handle for UnsafeRefHandle<'a, T> {
   }
 }
 
-impl<'a, T> Handle for &'a UnsafeRefHandle<'_, T> {
+impl<T> Handle for &UnsafeRefHandle<'_, T> {
   type Data = T;
   fn get_handle_info(&self) -> HandleInfo<T> {
     HandleInfo::new(
@@ -347,7 +420,7 @@ impl<'a, T> Handle for &'a UnsafeRefHandle<'_, T> {
   }
 }
 
-impl<'s, T> Borrow<T> for Local<'s, T> {
+impl<T> Borrow<T> for Local<'_, T> {
   fn borrow(&self) -> &T {
     self
   }
@@ -363,12 +436,12 @@ impl<T> Borrow<T> for Global<T> {
   }
 }
 
-impl<'s, T> Eq for Local<'s, T> where T: Eq {}
+impl<T> Eq for Local<'_, T> where T: Eq {}
 impl<T> Eq for Global<T> where T: Eq {}
 
-impl<'s, T: Hash> Hash for Local<'s, T> {
+impl<T: Hash> Hash for Local<'_, T> {
   fn hash<H: Hasher>(&self, state: &mut H) {
-    (**self).hash(state)
+    (**self).hash(state);
   }
 }
 
@@ -383,7 +456,7 @@ impl<T: Hash> Hash for Global<T> {
   }
 }
 
-impl<'s, T, Rhs: Handle> PartialEq<Rhs> for Local<'s, T>
+impl<T, Rhs: Handle> PartialEq<Rhs> for Local<'_, T>
 where
   T: PartialEq<Rhs::Data>,
 {
@@ -440,8 +513,7 @@ impl From<&'_ mut Isolate> for HandleHost {
 impl From<&'_ IsolateHandle> for HandleHost {
   fn from(isolate_handle: &IsolateHandle) -> Self {
     NonNull::new(unsafe { isolate_handle.get_isolate_ptr() })
-      .map(Self::Isolate)
-      .unwrap_or(Self::DisposedIsolate)
+      .map_or(Self::DisposedIsolate, Self::Isolate)
   }
 }
 
@@ -494,7 +566,7 @@ impl HandleHost {
     assert!(
       self.match_host(other, scope_opt),
       "attempt to use Handle in an Isolate that is not its host"
-    )
+    );
   }
 
   #[allow(dead_code)]
@@ -503,7 +575,7 @@ impl HandleHost {
   }
 
   fn assert_match_isolate(self, isolate: &mut Isolate) {
-    self.assert_match_host(isolate.into(), Some(isolate))
+    self.assert_match_host(isolate.into(), Some(isolate));
   }
 
   fn get_isolate(self) -> NonNull<Isolate> {
@@ -693,7 +765,7 @@ impl<T> Weak<T> {
     data: Option<NonNull<WeakData<T>>>,
   ) -> Self {
     Weak {
-      data: data.map(|raw| Box::from_raw(raw.cast().as_ptr())),
+      data: data.map(|raw| unsafe { Box::from_raw(raw.cast().as_ptr()) }),
       isolate_handle: isolate.thread_safe_handle(),
     }
   }
@@ -785,7 +857,7 @@ impl<T> Weak<T> {
 
   // Finalization callbacks.
 
-  extern "C" fn first_pass_callback(wci: *const WeakCallbackInfo) {
+  unsafe extern "C" fn first_pass_callback(wci: *const WeakCallbackInfo) {
     // SAFETY: If this callback is called, then the weak handle hasn't been
     // reset, which means the `Weak` instance which owns the pinned box that the
     // parameter points to hasn't been dropped.
@@ -805,12 +877,12 @@ impl<T> Weak<T> {
         v8__WeakCallbackInfo__SetSecondPassCallback(
           wci,
           Self::second_pass_callback,
-        )
+        );
       };
     }
   }
 
-  extern "C" fn second_pass_callback(wci: *const WeakCallbackInfo) {
+  unsafe extern "C" fn second_pass_callback(wci: *const WeakCallbackInfo) {
     // SAFETY: This callback is guaranteed by V8 to be called in the isolate's
     // thread before the isolate is disposed.
     let isolate = unsafe { &mut *v8__WeakCallbackInfo__GetIsolate(wci) };
@@ -978,3 +1050,136 @@ impl FinalizerMap {
     self.map.drain().map(|(_, finalizer)| finalizer)
   }
 }
+
+/// A traced handle without destructor that clears the handle. The embedder needs
+/// to ensure that the handle is not accessed once the V8 object has been
+/// reclaimed. For more details see BasicTracedReference.
+#[repr(C)]
+pub struct TracedReference<T> {
+  data: [u8; crate::binding::v8__TracedReference_SIZE],
+  _phantom: PhantomData<T>,
+}
+
+impl<T> TracedReference<T> {
+  /// An empty TracedReference without storage cell.
+  pub fn empty() -> Self {
+    let mut this = std::mem::MaybeUninit::uninit();
+    unsafe {
+      v8__TracedReference__CONSTRUCT(this.as_mut_ptr() as _);
+      this.assume_init()
+    }
+  }
+
+  /// Construct a TracedReference from a Local.
+  ///
+  /// A new storage cell is created pointing to the same object.
+  pub fn new(scope: &mut HandleScope<()>, data: Local<T>) -> Self {
+    let mut this = Self::empty();
+    this.reset(scope, Some(data));
+    this
+  }
+
+  pub fn get<'s>(
+    &self,
+    scope: &mut HandleScope<'s, ()>,
+  ) -> Option<Local<'s, T>> {
+    unsafe {
+      scope.cast_local(|sd| {
+        v8__TracedReference__Get(
+          self as *const Self as *const TracedReference<Data>,
+          sd.get_isolate_ptr(),
+        ) as *const T
+      })
+    }
+  }
+
+  /// Always resets the reference. Creates a new reference from `other` if it is
+  /// non-empty.
+  pub fn reset(&mut self, scope: &mut HandleScope<()>, data: Option<Local<T>>) {
+    unsafe {
+      v8__TracedReference__Reset(
+        self as *mut Self as *mut TracedReference<Data>,
+        scope.get_isolate_ptr(),
+        data
+          .map_or(std::ptr::null_mut(), |h| h.as_non_null().as_ptr())
+          .cast(),
+      );
+    }
+  }
+}
+
+impl<T> Drop for TracedReference<T> {
+  fn drop(&mut self) {
+    unsafe {
+      v8__TracedReference__DESTRUCT(
+        self as *mut Self as *mut TracedReference<Data>,
+      );
+    }
+  }
+}
+
+/// Eternal handles are set-once handles that live for the lifetime of the isolate.
+#[repr(C)]
+pub struct Eternal<T> {
+  data: [u8; crate::binding::v8__Eternal_SIZE],
+  _phantom: PhantomData<T>,
+}
+
+impl<T> Eternal<T> {
+  pub fn empty() -> Self {
+    let mut this = std::mem::MaybeUninit::uninit();
+    unsafe {
+      v8__Eternal__CONSTRUCT(this.as_mut_ptr() as _);
+      this.assume_init()
+    }
+  }
+
+  pub fn clear(&self) {
+    unsafe {
+      v8__Eternal__Clear(self as *const Self as *mut Eternal<Data>);
+    }
+  }
+
+  pub fn set(&self, scope: &mut HandleScope<()>, data: Local<T>) {
+    unsafe {
+      v8__Eternal__Set(
+        self as *const Self as *mut Eternal<Data>,
+        scope.get_isolate_ptr(),
+        data.as_non_null().as_ptr().cast(),
+      );
+    }
+  }
+
+  pub fn get<'s>(
+    &self,
+    scope: &mut HandleScope<'s, ()>,
+  ) -> Option<Local<'s, T>> {
+    unsafe {
+      scope.cast_local(|sd| {
+        v8__Eternal__Get(
+          self as *const Self as *const Eternal<Data>,
+          sd.get_isolate_ptr(),
+        ) as *const T
+      })
+    }
+  }
+
+  pub fn is_empty(&self) -> bool {
+    unsafe { v8__Eternal__IsEmpty(self as *const Self as *const Eternal<Data>) }
+  }
+}
+
+impl<T> Drop for Eternal<T> {
+  fn drop(&mut self) {
+    unsafe {
+      v8__Eternal__DESTRUCT(self as *mut Self as *mut Eternal<Data>);
+    }
+  }
+}
+
+/// A Local<T> passed from V8 without an inherent scope.
+/// The value must be "unsealed" with Scope::unseal to bind
+/// it to a lifetime.
+#[derive(Debug)]
+#[repr(transparent)]
+pub struct SealedLocal<T>(pub(crate) NonNull<T>);

@@ -24,7 +24,7 @@ default_args = {
   linux_use_bundled_binutils = false
   use_dummy_lastchange = true
   use_sysroot = false
-  win_crt_flavor_agnostic = true
+  simple_template_names = false
 
   # Minimize size of debuginfo in distributed static library.
   line_tables_only = true
@@ -32,11 +32,23 @@ default_args = {
   symbol_level = 1
   use_debug_fission = false
 
+  v8_embedder_string = "-rusty"
+
   v8_enable_sandbox = false
   v8_enable_javascript_promise_hooks = true
   v8_promise_internal_field_count = 1
   v8_use_external_startup_data = false
-  v8_use_snapshot = true
+
+  v8_enable_pointer_compression = false
+
+  v8_imminent_deprecation_warnings = false
+
+  # This flag speeds up the performance of fork/execve on Linux systems for
+  # embedders which use it (like Node.js). It works by marking the pages that
+  # V8 allocates as MADV_DONTFORK. Without MADV_DONTFORK, the Linux kernel
+  # spends a long time manipulating page mappings on fork and exec which the
+  # child process doesn't generally need to access.
+  v8_enable_private_mapping_fork_optimization = true
 
   # We prefer embedders to bring their own compression
   v8_use_zlib = false
@@ -50,6 +62,10 @@ default_args = {
   # fixed addresses.
   v8_typed_array_max_size_in_heap = 0
 
+  # Historically these always had 2 slots. Keep for compat.
+  v8_array_buffer_internal_field_count = 2
+  v8_array_buffer_view_internal_field_count = 2
+
   # Enabling the shared read-only heap comes with a restriction that all
   # isolates running at the same time must be created from the same snapshot.
   # This is problematic for Deno, which has separate "runtime" and "typescript
@@ -61,14 +77,9 @@ default_args = {
   # compile.
   v8_enable_verify_heap = false
 
-  # Maglev *should* be supported when pointer compression is disabled as per
-  # https://chromium-review.googlesource.com/c/v8/v8/+/4753150, but it still
-  # fails to compile.
-  v8_enable_maglev = false
-
   # Enable V8 object print for debugging.
   # v8_enable_object_print = true
-  
+
   # V8 12.3 added google/fuzztest as a third party dependency.
   # https://chromium.googlesource.com/v8/v8.git/+/d5acece0c9b89b18716c177d1fcc8f734191e1e2%5E%21/#F4
   #
@@ -81,6 +92,8 @@ default_args = {
   # rusty_v8 scopes are not on the stack.
   v8_enable_v8_checks = false
 
-  # Enable Deno-specific extra bindings
-  deno_enable_extras = true
+  use_relative_vtables_abi = false
+
+  v8_depend_on_icu_data_file = false
+  icu_copy_icudata_to_root_build_dir = false
 }

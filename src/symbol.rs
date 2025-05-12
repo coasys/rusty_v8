@@ -5,7 +5,7 @@ use crate::String;
 use crate::Symbol;
 use crate::Value;
 
-extern "C" {
+unsafe extern "C" {
   fn v8__Symbol__New(
     isolate: *mut Isolate,
     description: *const String,
@@ -27,7 +27,7 @@ extern "C" {
 macro_rules! well_known {
   ($name:ident, $binding:ident) => {
     pub fn $name<'s>(scope: &mut HandleScope<'s, ()>) -> Local<'s, Symbol> {
-      extern "C" {
+      unsafe extern "C" {
         fn $binding(isolate: *mut Isolate) -> *const Symbol;
       }
       unsafe { scope.cast_local(|sd| $binding(sd.get_isolate_ptr())) }.unwrap()
@@ -78,23 +78,6 @@ impl Symbol {
   /// Corresponds to v8::Symbol::ForApi() in C++.
   #[inline(always)]
   pub fn for_api<'s>(
-    scope: &mut HandleScope<'s, ()>,
-    description: Local<String>,
-  ) -> Local<'s, Symbol> {
-    unsafe {
-      scope.cast_local(|sd| {
-        v8__Symbol__ForApi(sd.get_isolate_ptr(), &*description)
-      })
-    }
-    .unwrap()
-  }
-
-  #[deprecated(
-    since = "0.77.0",
-    note = "This was documented as `for_key` but implemented as `for_api`"
-  )]
-  #[inline(always)]
-  pub fn for_global<'s>(
     scope: &mut HandleScope<'s, ()>,
     description: Local<String>,
   ) -> Local<'s, Symbol> {

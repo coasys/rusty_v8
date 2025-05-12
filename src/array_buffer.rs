@@ -3,11 +3,16 @@
 use std::cell::Cell;
 use std::ffi::c_void;
 use std::ops::Deref;
-use std::ptr::null;
 use std::ptr::NonNull;
+use std::ptr::null;
 use std::slice;
 
-use crate::support::long;
+use crate::ArrayBuffer;
+use crate::DataView;
+use crate::HandleScope;
+use crate::Isolate;
+use crate::Local;
+use crate::Value;
 use crate::support::MaybeBool;
 use crate::support::Opaque;
 use crate::support::Shared;
@@ -15,13 +20,9 @@ use crate::support::SharedPtrBase;
 use crate::support::SharedRef;
 use crate::support::UniquePtr;
 use crate::support::UniqueRef;
-use crate::ArrayBuffer;
-use crate::HandleScope;
-use crate::Isolate;
-use crate::Local;
-use crate::Value;
+use crate::support::long;
 
-extern "C" {
+unsafe extern "C" {
   fn v8__ArrayBuffer__Allocator__NewDefaultAllocator() -> *mut Allocator;
   fn v8__ArrayBuffer__Allocator__NewRustAllocator(
     handle: *const c_void,
@@ -58,7 +59,6 @@ extern "C" {
     deleter: BackingStoreDeleterCallback,
     deleter_data: *mut c_void,
   ) -> *mut BackingStore;
-  fn v8__BackingStore__EmptyBackingStore(shared: bool) -> *mut BackingStore;
 
   fn v8__BackingStore__Data(this: *const BackingStore) -> *mut c_void;
   fn v8__BackingStore__ByteLength(this: *const BackingStore) -> usize;
@@ -67,6 +67,12 @@ extern "C" {
     this: *const BackingStore,
   ) -> bool;
   fn v8__BackingStore__DELETE(this: *mut BackingStore);
+
+  fn v8__DataView__New(
+    arraybuffer: *const ArrayBuffer,
+    byte_offset: usize,
+    length: usize,
+  ) -> *const DataView;
 
   fn std__shared_ptr__v8__BackingStore__COPY(
     ptr: *const SharedPtrBase<BackingStore>,
@@ -129,12 +135,6 @@ pub struct RustAllocatorVtable<T> {
   pub allocate_uninitialized:
     unsafe extern "C" fn(handle: &T, len: usize) -> *mut c_void,
   pub free: unsafe extern "C" fn(handle: &T, data: *mut c_void, len: usize),
-  pub reallocate: unsafe extern "C" fn(
-    handle: &T,
-    data: *mut c_void,
-    old_length: usize,
-    new_length: usize,
-  ) -> *mut c_void,
   pub drop: unsafe extern "C" fn(handle: *const T),
 }
 
@@ -176,17 +176,19 @@ pub unsafe fn new_rust_allocator<T: Sized + Send + Sync + 'static>(
   handle: *const T,
   vtable: &'static RustAllocatorVtable<T>,
 ) -> UniqueRef<Allocator> {
-  UniqueRef::from_raw(v8__ArrayBuffer__Allocator__NewRustAllocator(
-    handle as *const c_void,
-    vtable as *const RustAllocatorVtable<T>
-      as *const RustAllocatorVtable<c_void>,
-  ))
+  unsafe {
+    UniqueRef::from_raw(v8__ArrayBuffer__Allocator__NewRustAllocator(
+      handle as *const c_void,
+      vtable as *const RustAllocatorVtable<T>
+        as *const RustAllocatorVtable<c_void>,
+    ))
+  }
 }
 
 #[test]
 fn test_rust_allocator() {
-  use std::sync::atomic::{AtomicUsize, Ordering};
   use std::sync::Arc;
+  use std::sync::atomic::{AtomicUsize, Ordering};
 
   unsafe extern "C" fn allocate(_: &AtomicUsize, _: usize) -> *mut c_void {
     unimplemented!()
@@ -200,17 +202,11 @@ fn test_rust_allocator() {
   unsafe extern "C" fn free(_: &AtomicUsize, _: *mut c_void, _: usize) {
     unimplemented!()
   }
-  unsafe extern "C" fn reallocate(
-    _: &AtomicUsize,
-    _: *mut c_void,
-    _: usize,
-    _: usize,
-  ) -> *mut c_void {
-    unimplemented!()
-  }
   unsafe extern "C" fn drop(x: *const AtomicUsize) {
-    let arc = Arc::from_raw(x);
-    arc.store(42, Ordering::SeqCst);
+    unsafe {
+      let arc = Arc::from_raw(x);
+      arc.store(42, Ordering::SeqCst);
+    }
   }
 
   let retval = Arc::new(AtomicUsize::new(0));
@@ -220,7 +216,6 @@ fn test_rust_allocator() {
       allocate,
       allocate_uninitialized,
       free,
-      reallocate,
       drop,
     };
   unsafe { new_rust_allocator(Arc::into_raw(retval.clone()), vtable) };
@@ -246,26 +241,70 @@ pub type BackingStoreDeleterCallback = unsafe extern "C" fn(
 );
 
 pub(crate) mod sealed {
-  pub trait Rawable<T: ?Sized> {
+  pub trait Rawable {
+    fn byte_len(&mut self) -> usize;
     fn into_raw(self) -> (*const (), *const u8);
     unsafe fn drop_raw(ptr: *const (), size: usize);
   }
 }
 
-impl sealed::Rawable<[u8]> for Vec<u8> {
-  unsafe fn drop_raw(ptr: *const (), size: usize) {
-    <Box<[u8]> as sealed::Rawable<[u8]>>::drop_raw(ptr, size);
-  }
+macro_rules! rawable {
+  ($ty:ty) => {
+    impl sealed::Rawable for Box<[$ty]> {
+      fn byte_len(&mut self) -> usize {
+        self.as_mut().len() * std::mem::size_of::<$ty>()
+      }
 
-  fn into_raw(self) -> (*const (), *const u8) {
-    self.into_boxed_slice().into_raw()
-  }
+      fn into_raw(mut self) -> (*const (), *const u8) {
+        // Thin the fat pointer
+        let ptr = self.as_mut_ptr();
+        std::mem::forget(self);
+        (ptr as _, ptr as _)
+      }
+
+      unsafe fn drop_raw(ptr: *const (), len: usize) {
+        // Fatten the thin pointer
+        _ = unsafe {
+          Self::from_raw(std::ptr::slice_from_raw_parts_mut(ptr as _, len))
+        };
+      }
+    }
+
+    impl sealed::Rawable for Vec<$ty> {
+      fn byte_len(&mut self) -> usize {
+        Vec::<$ty>::len(self) * std::mem::size_of::<$ty>()
+      }
+
+      unsafe fn drop_raw(ptr: *const (), size: usize) {
+        unsafe {
+          <Box<[$ty]> as sealed::Rawable>::drop_raw(ptr, size);
+        }
+      }
+
+      fn into_raw(self) -> (*const (), *const u8) {
+        self.into_boxed_slice().into_raw()
+      }
+    }
+  };
 }
 
-impl<T: Sized> sealed::Rawable<T> for Box<T>
+rawable!(u8);
+rawable!(u16);
+rawable!(u32);
+rawable!(u64);
+rawable!(i8);
+rawable!(i16);
+rawable!(i32);
+rawable!(i64);
+
+impl<T: Sized> sealed::Rawable for Box<T>
 where
   T: AsMut<[u8]>,
 {
+  fn byte_len(&mut self) -> usize {
+    self.as_mut().as_mut().len()
+  }
+
   fn into_raw(mut self) -> (*const (), *const u8) {
     let data = self.as_mut().as_mut().as_mut_ptr();
     let ptr = Self::into_raw(self);
@@ -273,21 +312,9 @@ where
   }
 
   unsafe fn drop_raw(ptr: *const (), _len: usize) {
-    _ = Self::from_raw(ptr as _);
-  }
-}
-
-impl sealed::Rawable<[u8]> for Box<[u8]> {
-  fn into_raw(mut self) -> (*const (), *const u8) {
-    // Thin the fat pointer
-    let ptr = self.as_mut_ptr();
-    std::mem::forget(self);
-    (ptr as _, ptr)
-  }
-
-  unsafe fn drop_raw(ptr: *const (), len: usize) {
-    // Fatten the thin pointer
-    _ = Self::from_raw(std::ptr::slice_from_raw_parts_mut(ptr as _, len));
+    unsafe {
+      _ = Self::from_raw(ptr as _);
+    }
   }
 }
 
@@ -422,16 +449,6 @@ impl ArrayBuffer {
     .unwrap()
   }
 
-  /// Create a new, empty ArrayBuffer.
-  #[inline(always)]
-  pub fn empty<'s>(scope: &mut HandleScope<'s>) -> Local<'s, ArrayBuffer> {
-    // SAFETY: This is a v8-provided empty backing store
-    let backing_store = unsafe {
-      UniqueRef::from_raw(v8__BackingStore__EmptyBackingStore(false))
-    };
-    Self::with_backing_store(scope, &backing_store.make_shared())
-  }
-
   /// Data length in bytes.
   #[inline(always)]
   pub fn byte_length(&self) -> usize {
@@ -464,7 +481,7 @@ impl ArrayBuffer {
     // V8 terminates when the ArrayBuffer is not detachable. Non-detachable
     // buffers are buffers that are in use by WebAssembly or asm.js.
     if self.is_detachable() {
-      let key = key.map(|v| &*v as *const Value).unwrap_or(null());
+      let key = key.map_or(null(), |v| &*v as *const Value);
       unsafe { v8__ArrayBuffer__Detach(self, key) }.into()
     } else {
       Some(true)
@@ -558,31 +575,23 @@ impl ArrayBuffer {
   /// let backing_store = v8::ArrayBuffer::new_backing_store_from_bytes(Box::new(bytes::BytesMut::new()));
   /// ```
   #[inline(always)]
-  pub fn new_backing_store_from_bytes<T, U>(
+  pub fn new_backing_store_from_bytes<T>(
     mut bytes: T,
   ) -> UniqueRef<BackingStore>
   where
-    U: ?Sized,
-    U: AsMut<[u8]>,
-    T: AsMut<U>,
-    T: sealed::Rawable<U>,
+    T: sealed::Rawable,
   {
-    let len = bytes.as_mut().as_mut().len();
-    if len == 0 {
-      return unsafe {
-        UniqueRef::from_raw(v8__BackingStore__EmptyBackingStore(false))
-      };
-    }
+    let len = bytes.byte_len();
 
     let (ptr, slice) = T::into_raw(bytes);
 
-    extern "C" fn drop_rawable<T: sealed::Rawable<U>, U: ?Sized>(
+    unsafe extern "C" fn drop_rawable<T: sealed::Rawable>(
       _ptr: *mut c_void,
       len: usize,
       data: *mut c_void,
     ) {
       // SAFETY: We know that data is a raw T from above
-      unsafe { <T as sealed::Rawable<U>>::drop_raw(data as _, len) }
+      unsafe { T::drop_raw(data as _, len) }
     }
 
     // SAFETY: We are extending the lifetime of a slice, but we're locking away the box that we
@@ -591,7 +600,7 @@ impl ArrayBuffer {
       Self::new_backing_store_from_ptr(
         slice as _,
         len,
-        drop_rawable::<T, U>,
+        drop_rawable::<T>,
         ptr as _,
       )
     }
@@ -608,11 +617,30 @@ impl ArrayBuffer {
     deleter_callback: BackingStoreDeleterCallback,
     deleter_data: *mut c_void,
   ) -> UniqueRef<BackingStore> {
-    UniqueRef::from_raw(v8__ArrayBuffer__NewBackingStore__with_data(
-      data_ptr,
-      byte_length,
-      deleter_callback,
-      deleter_data,
-    ))
+    unsafe {
+      UniqueRef::from_raw(v8__ArrayBuffer__NewBackingStore__with_data(
+        data_ptr,
+        byte_length,
+        deleter_callback,
+        deleter_data,
+      ))
+    }
+  }
+}
+
+impl DataView {
+  /// Returns a new DataView.
+  #[inline(always)]
+  pub fn new<'s>(
+    scope: &mut HandleScope<'s>,
+    arraybuffer: Local<'s, ArrayBuffer>,
+    byte_offset: usize,
+    length: usize,
+  ) -> Local<'s, DataView> {
+    unsafe {
+      scope
+        .cast_local(|_| v8__DataView__New(&*arraybuffer, byte_offset, length))
+    }
+    .unwrap()
   }
 }

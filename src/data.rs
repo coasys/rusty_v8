@@ -12,10 +12,10 @@ use std::hash::Hasher;
 use std::mem::transmute;
 use std::ops::Deref;
 
-use crate::support::Opaque;
 use crate::Local;
+use crate::support::Opaque;
 
-extern "C" {
+unsafe extern "C" {
   fn v8__Data__EQ(this: *const Data, other: *const Data) -> bool;
   fn v8__Data__IsBigInt(this: *const Data) -> bool;
   fn v8__Data__IsBoolean(this: *const Data) -> bool;
@@ -158,10 +158,12 @@ macro_rules! impl_try_from {
         // Not dead: `cast()` is sometimes used in the $check expression.
         #[allow(dead_code)]
         fn cast<T>(l: Local<$source>) -> Local<T> {
-          unsafe { transmute(l) }
+          unsafe { transmute::<Local<$source>, Local<T>>(l) }
         }
         match l {
-          $value if $check => Ok(unsafe { transmute(l) }),
+          $value if $check => Ok(unsafe {
+            transmute::<Local<'s, $source>, Local<'s, $target>>(l)
+          }),
           _ => Err(DataError::bad_type::<$target, $source>())
         }
       }
@@ -251,10 +253,10 @@ impl Display for DataError {
   fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
     match self {
       Self::BadType { expected, actual } => {
-        write!(f, "expected type `{}`, got `{}`", expected, actual)
+        write!(f, "expected type `{expected}`, got `{actual}`")
       }
       Self::NoData { expected } => {
-        write!(f, "expected `Some({})`, found `None`", expected)
+        write!(f, "expected `Some({expected})`, found `None`")
       }
     }
   }

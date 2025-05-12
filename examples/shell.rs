@@ -12,7 +12,7 @@ fn main() {
   let isolate = &mut v8::Isolate::new(v8::CreateParams::default());
   let handle_scope = &mut v8::HandleScope::new(isolate);
 
-  let context = v8::Context::new(handle_scope);
+  let context = v8::Context::new(handle_scope, Default::default());
 
   let context_scope = &mut v8::ContextScope::new(handle_scope, context);
   let scope = &mut v8::HandleScope::new(context_scope);
@@ -44,7 +44,7 @@ fn run_shell(scope: &mut v8::HandleScope) {
 
         execute_string(scope, &buf, "(shell)", true, true);
       }
-      Err(error) => println!("error: {}", error),
+      Err(error) => println!("error: {error}"),
     }
   }
 }
@@ -89,7 +89,7 @@ fn run_main(
       }
       arg => {
         if arg.starts_with("--") {
-          eprintln!("Warning: unknown flag {}.\nTry --help for options", arg);
+          eprintln!("Warning: unknown flag {arg}.\nTry --help for options");
           continue;
         }
 
@@ -119,7 +119,6 @@ fn execute_string(
   let mut scope = v8::TryCatch::new(scope);
 
   let filename = v8::String::new(&mut scope, filename).unwrap();
-  let undefined = v8::undefined(&mut scope);
   let script = v8::String::new(&mut scope, script).unwrap();
   let origin = v8::ScriptOrigin::new(
     &mut scope,
@@ -128,10 +127,11 @@ fn execute_string(
     0,
     false,
     0,
-    undefined.into(),
+    None,
     false,
     false,
     false,
+    None,
   );
 
   let script = if let Some(script) =
@@ -174,7 +174,7 @@ fn report_exceptions(mut try_catch: v8::TryCatch<v8::HandleScope>) {
   let message = if let Some(message) = try_catch.message() {
     message
   } else {
-    eprintln!("{}", exception_string);
+    eprintln!("{exception_string}");
     return;
   };
 
@@ -191,7 +191,7 @@ fn report_exceptions(mut try_catch: v8::TryCatch<v8::HandleScope>) {
     );
   let line_number = message.get_line_number(&mut try_catch).unwrap_or_default();
 
-  eprintln!("{}:{}: {}", filename, line_number, exception_string);
+  eprintln!("{filename}:{line_number}: {exception_string}");
 
   // Print line of source code.
   let source_line = message
@@ -202,7 +202,7 @@ fn report_exceptions(mut try_catch: v8::TryCatch<v8::HandleScope>) {
         .to_rust_string_lossy(&mut try_catch)
     })
     .unwrap();
-  eprintln!("{}", source_line);
+  eprintln!("{source_line}");
 
   // Print wavy underline (GetUnderline is deprecated).
   let start_column = message.get_start_column();
@@ -224,12 +224,13 @@ fn report_exceptions(mut try_catch: v8::TryCatch<v8::HandleScope>) {
   } else {
     return;
   };
-  let stack_trace = unsafe { v8::Local::<v8::String>::cast(stack_trace) };
+  let stack_trace =
+    unsafe { v8::Local::<v8::String>::cast_unchecked(stack_trace) };
   let stack_trace = stack_trace
     .to_string(&mut try_catch)
     .map(|s| s.to_rust_string_lossy(&mut try_catch));
 
   if let Some(stack_trace) = stack_trace {
-    eprintln!("{}", stack_trace);
+    eprintln!("{stack_trace}");
   }
 }

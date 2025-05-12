@@ -1,15 +1,15 @@
-use crate::support::int;
 use crate::Isolate;
+use crate::support::int;
 
-use crate::support::long;
 use crate::support::Opaque;
 use crate::support::Shared;
 use crate::support::SharedPtrBase;
 use crate::support::SharedRef;
 use crate::support::UniquePtr;
 use crate::support::UniqueRef;
+use crate::support::long;
 
-extern "C" {
+unsafe extern "C" {
   fn v8__Platform__NewDefaultPlatform(
     thread_pool_size: int,
     idle_task_support: bool,
@@ -33,6 +33,11 @@ extern "C" {
     platform: *mut Platform,
     isolate: *mut Isolate,
     idle_time_in_seconds: f64,
+  );
+
+  fn v8__Platform__NotifyIsolateShutdown(
+    platform: *mut Platform,
+    isolate: *mut Isolate,
   );
 
   fn std__shared_ptr__v8__Platform__CONVERT__std__unique_ptr(
@@ -209,7 +214,25 @@ impl Platform {
         &**platform as *const Self as *mut _,
         isolate,
         idle_time_in_seconds,
-      )
+      );
+    }
+  }
+
+  /// Notifies the given platform about the Isolate getting deleted soon. Has to
+  /// be called for all Isolates which are deleted - unless we're shutting down
+  /// the platform.
+  ///
+  /// The |platform| has to be created using |NewDefaultPlatform|.
+  #[inline(always)]
+  pub(crate) unsafe fn notify_isolate_shutdown(
+    platform: &SharedRef<Self>,
+    isolate: &mut Isolate,
+  ) {
+    unsafe {
+      v8__Platform__NotifyIsolateShutdown(
+        &**platform as *const Self as *mut _,
+        isolate,
+      );
     }
   }
 }

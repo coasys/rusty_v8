@@ -1,8 +1,3 @@
-use crate::isolate::Isolate;
-use crate::support::int;
-use crate::support::MapFnTo;
-use crate::support::Maybe;
-use crate::support::MaybeBool;
 use crate::AccessorConfiguration;
 use crate::AccessorNameGetterCallback;
 use crate::AccessorNameSetterCallback;
@@ -25,13 +20,22 @@ use crate::PropertyFilter;
 use crate::Set;
 use crate::String;
 use crate::Value;
+use crate::binding::RustObj;
+use crate::cppgc::GarbageCollected;
+use crate::cppgc::GetRustObj;
+use crate::cppgc::Ptr;
+use crate::isolate::Isolate;
+use crate::support::MapFnTo;
+use crate::support::Maybe;
+use crate::support::MaybeBool;
+use crate::support::int;
 use std::convert::TryFrom;
 use std::ffi::c_void;
 use std::mem::MaybeUninit;
 use std::num::NonZeroI32;
 use std::ptr::null;
 
-extern "C" {
+unsafe extern "C" {
   fn v8__Object__New(isolate: *mut Isolate) -> *const Object;
   fn v8__Object__New__with_prototype_and_properties(
     isolate: *mut Isolate,
@@ -54,6 +58,12 @@ extern "C" {
     context: *const Context,
     key: *const Value,
   ) -> *const Value;
+  fn v8__Object__GetWithReceiver(
+    this: *const Object,
+    context: *const Context,
+    key: *const Value,
+    receiver: *const Object,
+  ) -> *const Value;
   fn v8__Object__GetIndex(
     this: *const Object,
     context: *const Context,
@@ -65,6 +75,13 @@ extern "C" {
     context: *const Context,
     key: *const Value,
     value: *const Value,
+  ) -> MaybeBool;
+  fn v8__Object__SetWithReceiver(
+    this: *const Object,
+    context: *const Context,
+    key: *const Value,
+    value: *const Value,
+    receiver: *const Object,
   ) -> MaybeBool;
   fn v8__Object__SetIndex(
     this: *const Object,
@@ -203,12 +220,29 @@ extern "C" {
     context: *const Context,
     key: *const Name,
   ) -> *const Value;
+  fn v8__Object__HasRealNamedProperty(
+    this: *const Object,
+    context: *const Context,
+    key: *const Name,
+  ) -> MaybeBool;
   fn v8__Object__GetRealNamedPropertyAttributes(
     this: *const Object,
     context: *const Context,
     key: *const Name,
     out: *mut Maybe<PropertyAttribute>,
   );
+  fn v8__Object__Wrap(
+    isolate: *const Isolate,
+    wrapper: *const Object,
+    value: *const RustObj,
+    tag: u16,
+  );
+  fn v8__Object__Unwrap(
+    isolate: *const Isolate,
+    wrapper: *const Object,
+    tag: u16,
+  ) -> *mut RustObj;
+  fn v8__Object__IsApiWrapper(this: *const Object) -> bool;
 
   fn v8__Array__New(isolate: *mut Isolate, length: int) -> *const Array;
   fn v8__Array__New_with_elements(
@@ -263,6 +297,8 @@ extern "C" {
   fn v8__Set__As__Array(this: *const Set) -> *const Array;
 }
 
+const LAST_TAG: u16 = 0x7fff;
+
 impl Object {
   /// Creates an empty object.
   #[inline(always)]
@@ -311,6 +347,28 @@ impl Object {
   ) -> Option<bool> {
     unsafe {
       v8__Object__Set(self, &*scope.get_current_context(), &*key, &*value)
+    }
+    .into()
+  }
+
+  /// SetWithReceiver only return Just(true) or Empty(), so if it should never fail, use
+  /// result.Check().
+  #[inline(always)]
+  pub fn set_with_receiver(
+    &self,
+    scope: &mut HandleScope,
+    key: Local<Value>,
+    value: Local<Value>,
+    receiver: Local<Object>,
+  ) -> Option<bool> {
+    unsafe {
+      v8__Object__SetWithReceiver(
+        self,
+        &*scope.get_current_context(),
+        &*key,
+        &*value,
+        &*receiver,
+      )
     }
     .into()
   }
@@ -432,6 +490,25 @@ impl Object {
   }
 
   #[inline(always)]
+  pub fn get_with_receiver<'s>(
+    &self,
+    scope: &mut HandleScope<'s>,
+    key: Local<Value>,
+    receiver: Local<Object>,
+  ) -> Option<Local<'s, Value>> {
+    unsafe {
+      scope.cast_local(|sd| {
+        v8__Object__GetWithReceiver(
+          self,
+          sd.get_current_context(),
+          &*key,
+          &*receiver,
+        )
+      })
+    }
+  }
+
+  #[inline(always)]
   pub fn get_index<'s>(
     &self,
     scope: &mut HandleScope<'s>,
@@ -460,7 +537,7 @@ impl Object {
     &self,
     scope: &mut HandleScope,
     name: Local<Name>,
-    getter: impl for<'s> MapFnTo<AccessorNameGetterCallback<'s>>,
+    getter: impl MapFnTo<AccessorNameGetterCallback>,
   ) -> Option<bool> {
     self.set_accessor_with_configuration(
       scope,
@@ -474,8 +551,8 @@ impl Object {
     &self,
     scope: &mut HandleScope,
     name: Local<Name>,
-    getter: impl for<'s> MapFnTo<AccessorNameGetterCallback<'s>>,
-    setter: impl for<'s> MapFnTo<AccessorNameSetterCallback<'s>>,
+    getter: impl MapFnTo<AccessorNameGetterCallback>,
+    setter: impl MapFnTo<AccessorNameSetterCallback>,
   ) -> Option<bool> {
     self.set_accessor_with_configuration(
       scope,
@@ -665,7 +742,7 @@ impl Object {
     &self,
     index: i32,
   ) -> *const c_void {
-    v8__Object__GetAlignedPointerFromInternalField(self, index)
+    unsafe { v8__Object__GetAlignedPointerFromInternalField(self, index) }
   }
 
   /// Sets a 2-byte-aligned native pointer in an internal field.
@@ -678,6 +755,57 @@ impl Object {
     value: *const c_void,
   ) {
     unsafe { v8__Object__SetAlignedPointerInInternalField(self, index, value) }
+  }
+
+  /// Wraps a JS wrapper with a C++ instance.
+  ///
+  /// # Safety
+  ///
+  /// The `TAG` must be unique to the caller within the heap.
+  #[allow(clippy::not_unsafe_ptr_arg_deref)]
+  #[inline(always)]
+  pub unsafe fn wrap<const TAG: u16, T: GarbageCollected>(
+    isolate: &mut Isolate,
+    wrapper: Local<Object>,
+    value: &impl GetRustObj<T>,
+  ) {
+    const {
+      assert!(TAG < LAST_TAG);
+    }
+    let ptr = value.get_rust_obj();
+    unsafe { v8__Object__Wrap(isolate as *mut _, &*wrapper, ptr, TAG) }
+  }
+
+  /// Unwraps a JS wrapper object.
+  ///
+  /// # Safety
+  ///
+  /// The caller must ensure that the returned pointer is always stored on
+  /// the stack, or is safely moved into one of the other cppgc pointer types.
+  #[inline(always)]
+  pub unsafe fn unwrap<const TAG: u16, T: GarbageCollected>(
+    isolate: &mut Isolate,
+    wrapper: Local<Object>,
+  ) -> Option<Ptr<T>> {
+    const {
+      assert!(TAG < LAST_TAG);
+    }
+    let ptr = unsafe { v8__Object__Unwrap(isolate as *mut _, &*wrapper, TAG) };
+    unsafe { Ptr::new(&ptr) }
+  }
+
+  /// Returns true if this object can be generally used to wrap object objects.
+  /// This means that the object either follows the convention of using embedder
+  /// fields to denote type/instance pointers or is using the Wrap()/Unwrap()
+  /// APIs for the same purpose. Returns false otherwise.
+  ///
+  /// Note that there may be other objects that use embedder fields but are not
+  /// used as API wrapper objects. E.g., v8::Promise may in certain configuration
+  /// use embedder fields but promises are not generally supported as API
+  /// wrappers. The method will return false in those cases.
+  #[inline(always)]
+  pub fn is_api_wrapper(&self) -> bool {
+    unsafe { v8__Object__IsApiWrapper(self) }
   }
 
   /// Sets the integrity level of the object.
@@ -798,7 +926,7 @@ impl Object {
         &*scope.get_current_context(),
         &*key,
         &mut out,
-      )
+      );
     };
     out.into()
   }
@@ -859,6 +987,22 @@ impl Object {
     }
   }
 
+  #[inline(always)]
+  pub fn has_real_named_property(
+    &self,
+    scope: &mut HandleScope,
+    key: Local<Name>,
+  ) -> Option<bool> {
+    unsafe {
+      v8__Object__HasRealNamedProperty(
+        self,
+        &*scope.get_current_context(),
+        &*key,
+      )
+    }
+    .into()
+  }
+
   /// Gets the property attributes of a real property which can be
   /// None or any combination of ReadOnly, DontEnum and DontDelete.
   /// Interceptors in the prototype chain are not called.
@@ -875,7 +1019,7 @@ impl Object {
         &*scope.get_current_context(),
         &*key,
         &mut out,
-      )
+      );
     }
     out.into()
   }

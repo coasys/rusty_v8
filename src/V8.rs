@@ -1,17 +1,19 @@
 // Copyright 2019-2021 the Deno authors. All rights reserved. MIT license.
-use once_cell::sync::Lazy;
 use std::ffi::CStr;
 use std::ffi::CString;
 use std::sync::Mutex;
 use std::vec::Vec;
 
 use crate::platform::Platform;
+use crate::support::MapFnFrom;
+use crate::support::MapFnTo;
+use crate::support::SharedRef;
+use crate::support::ToCFn;
+use crate::support::UnitType;
 use crate::support::char;
 use crate::support::int;
-use crate::support::SharedRef;
-use crate::support::UnitType;
 
-extern "C" {
+unsafe extern "C" {
   fn v8__V8__SetFlagsFromCommandLine(
     argc: *mut int,
     argv: *mut *mut char,
@@ -24,7 +26,14 @@ extern "C" {
   fn v8__V8__Initialize();
   fn v8__V8__Dispose() -> bool;
   fn v8__V8__DisposePlatform();
+  fn v8__V8__SetFatalErrorHandler(that: V8FatalErrorCallback);
 }
+
+pub type V8FatalErrorCallback = unsafe extern "C" fn(
+  file: *const std::ffi::c_char,
+  line: std::ffi::c_int,
+  message: *const std::ffi::c_char,
+);
 
 /// EntropySource is used as a callback function when v8 needs a source
 /// of entropy.
@@ -42,7 +51,7 @@ impl<F> IntoEntropySource for F where
 {
 }
 
-type RawEntropySource = extern "C" fn(*mut u8, usize) -> bool;
+type RawEntropySource = unsafe extern "C" fn(*mut u8, usize) -> bool;
 
 impl<F> From<F> for EntropySource
 where
@@ -50,7 +59,7 @@ where
 {
   fn from(_: F) -> Self {
     #[inline(always)]
-    extern "C" fn adapter<F: IntoEntropySource>(
+    unsafe extern "C" fn adapter<F: IntoEntropySource>(
       buffer: *mut u8,
       length: usize,
     ) -> bool {
@@ -72,8 +81,7 @@ enum GlobalState {
 }
 use GlobalState::*;
 
-static GLOBAL_STATE: Lazy<Mutex<GlobalState>> =
-  Lazy::new(|| Mutex::new(Uninitialized));
+static GLOBAL_STATE: Mutex<GlobalState> = Mutex::new(Uninitialized);
 
 pub fn assert_initialized() {
   let global_state_guard = GLOBAL_STATE.lock().unwrap();
@@ -185,7 +193,7 @@ pub fn initialize_platform(platform: SharedRef<Platform>) {
 
   {
     unsafe {
-      v8__V8__InitializePlatform(&*platform as *const Platform as *mut _)
+      v8__V8__InitializePlatform(&*platform as *const Platform as *mut _);
     };
   }
 }
@@ -229,7 +237,7 @@ pub unsafe fn dispose() -> bool {
     Initialized(ref platform) => Disposed(platform.clone()),
     _ => panic!("Invalid global state"),
   };
-  assert!(v8__V8__Dispose());
+  assert!(unsafe { v8__V8__Dispose() });
   true
 }
 
@@ -246,4 +254,29 @@ pub fn dispose_platform() {
     }
     _ => panic!("Invalid global state"),
   };
+}
+
+impl<F> MapFnFrom<F> for V8FatalErrorCallback
+where
+  F: UnitType + Fn(&str, i32, &str),
+{
+  fn mapping() -> Self {
+    let f = |file, line, message| unsafe {
+      let file = std::ffi::CStr::from_ptr(file).to_str().unwrap_or_default();
+      let message = std::ffi::CStr::from_ptr(message)
+        .to_str()
+        .unwrap_or_default();
+      (F::get())(file, line, message);
+    };
+    f.to_c_fn()
+  }
+}
+
+/// Set the callback to invoke in the case of CHECK failures or fatal
+/// errors. This is distinct from Isolate::SetFatalErrorHandler, which
+/// is invoked in response to API usage failures.
+pub fn set_fatal_error_handler(that: impl MapFnTo<V8FatalErrorCallback>) {
+  unsafe {
+    v8__V8__SetFatalErrorHandler(that.map_fn_to());
+  }
 }
