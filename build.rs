@@ -842,10 +842,14 @@ fn deactivate_lld() {
         gn_args.push(' ');
       }
       gn_args.push_str("use_lld=false");
-      env::set_var("GN_ARGS", gn_args);
+      unsafe {
+        env::set_var("GN_ARGS", gn_args);
+      }
     }
   } else {
-    env::set_var("GN_ARGS", "use_lld=false");
+    unsafe {
+      env::set_var("GN_ARGS", "use_lld=false"); 
+    }
   }
 }
 
@@ -1275,6 +1279,8 @@ fn patch_inspector_protocol() {
   } else {
       println!("Warning: Could not find outputs_pre line to patch in inspector_protocol.gni");
   }
+}
+
 fn env_bool(key: &str) -> bool {
   matches!(
     env::var(key).unwrap_or_default().as_str(),
