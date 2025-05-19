@@ -863,10 +863,13 @@ fn find_compatible_system_clang(target_os: &str) -> Option<PathBuf> {
       None
     }
   } else if target_os == "macos" {
-    let clang_path = Path::new("/usr").join("bin").join("clang");
+    //let clang_path = Path::new("/usr").join("bin").join("clang");
+    //let clang_base_path = Path::new("/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr");
+    let clang_base_path = Path::new("/opt/homebrew/opt/llvm");
+    let clang_path = clang_base_path.join("bin").join("clang");
     if is_compatible_clang_version(&clang_path.display().to_string()) {
       deactivate_lld();
-      return Some(Path::new("/usr").to_path_buf());
+      return Some(clang_base_path.to_path_buf());
     } else {
       None
     }

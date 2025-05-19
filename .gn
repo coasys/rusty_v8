@@ -20,6 +20,7 @@ default_args = {
   clang_use_chrome_plugins = false
   is_component_build = false
   treat_warnings_as_errors = false
+  use_system_clang = true
 
   linux_use_bundled_binutils = false
   use_dummy_lastchange = true
