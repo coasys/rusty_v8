@@ -90,7 +90,8 @@ jobs:
           sudo apt-get update
           sudo apt-get -qq remove 'clang-*'
           sudo apt-get install lld-19 clang-19 clang-tools-19 -y
-          echo "CLANG_BASE_PATH=/usr/lib/llvm-19" >> "${GITHUB_ENV}"
+          # Do NOT set CLANG_BASE_PATH — build.rs will call clang_download()
+          # and use Chromium's bundled clang which has all needed runtime libs
 
       - name: Write git_submodule_status.txt
         run: git submodule status --recursive > git_submodule_status.txt
