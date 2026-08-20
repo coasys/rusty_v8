@@ -29,11 +29,15 @@ jobs:
       fail-fast: false
       matrix:
         config:
-          - os: macos-13
+          # macOS runners bumped to macos-15 (Xcode 16 / SDK 15+) because V8 150
+          # requires SDK 15+. Older macos-13/macos-14 images ship Xcode 15.4 with
+          # only SDK 14.5, causing `find_sdk.py` to fail with:
+          #   Exception: No 15+ SDK found.
+          - os: macos-15
             target: x86_64-apple-darwin
             # sccache platform = what's running on the runner (host arch)
 
-          - os: macos-14
+          - os: macos-15
             target: aarch64-apple-darwin
 
           - os: ubuntu-22.04
