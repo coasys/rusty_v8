@@ -148,19 +148,48 @@ jobs:
         shell: bash
         run: rm -rf target/*/release/gn_out target/*/debug/gn_out 2>/dev/null || true
 
-      - name: Build V8 static library
+      # Build BOTH variants so downstream consumers can pick either:
+      #  - plain "release" (no extra features)
+      #  - "simdutf release" (needed by deno_core 2.9+, which unconditionally
+      #    calls v8::simdutf::validate_ascii() so v8 must be compiled with
+      #    the simdutf cargo feature). Publishing both variants avoids
+      #    forcing every downstream to set V8_FROM_SOURCE=1.
+
+      - name: Build V8 static library (plain release)
         env:
           SCCACHE_IDLE_TIMEOUT: 0
         run: |
           cargo build --release --locked --target ${{ matrix.config.target }}
 
-      - name: Prepare release artifacts
+      - name: Prepare plain release artifacts
         shell: bash
         run: |
           LIB_FILE="target/${{ matrix.config.target }}/release/gn_out/obj/${{ env.LIB_NAME }}.${{ env.LIB_EXT }}"
           OUT_GZ="target/${{ env.LIB_NAME }}_release_${{ matrix.config.target }}.${{ env.LIB_EXT }}.gz"
           SRC_BINDING="target/${{ matrix.config.target }}/release/gn_out/src_binding.rs"
           OUT_BINDING="target/src_binding_release_${{ matrix.config.target }}.rs"
+
+          gzip -9c "$LIB_FILE" > "$OUT_GZ"
+          cp "$SRC_BINDING" "$OUT_BINDING"
+
+          ls -lh "$OUT_GZ" "$OUT_BINDING"
+
+      - name: Build V8 static library (simdutf release)
+        env:
+          SCCACHE_IDLE_TIMEOUT: 0
+        run: |
+          # Clear gn_out so build.rs regenerates GN args with rusty_v8_enable_simdutf=true.
+          # (target/release/build/v8-*/ is kept — sccache still speeds up the actual cc/cxx work.)
+          rm -rf target/${{ matrix.config.target }}/release/gn_out
+          cargo build --release --locked --features simdutf --target ${{ matrix.config.target }}
+
+      - name: Prepare simdutf release artifacts
+        shell: bash
+        run: |
+          LIB_FILE="target/${{ matrix.config.target }}/release/gn_out/obj/${{ env.LIB_NAME }}.${{ env.LIB_EXT }}"
+          OUT_GZ="target/${{ env.LIB_NAME }}_simdutf_release_${{ matrix.config.target }}.${{ env.LIB_EXT }}.gz"
+          SRC_BINDING="target/${{ matrix.config.target }}/release/gn_out/src_binding.rs"
+          OUT_BINDING="target/src_binding_simdutf_release_${{ matrix.config.target }}.rs"
 
           gzip -9c "$LIB_FILE" > "$OUT_GZ"
           cp "$SRC_BINDING" "$OUT_BINDING"
@@ -176,3 +205,5 @@ jobs:
           files: |
             target/${{ env.LIB_NAME }}_release_${{ matrix.config.target }}.${{ env.LIB_EXT }}.gz
             target/src_binding_release_${{ matrix.config.target }}.rs
+            target/${{ env.LIB_NAME }}_simdutf_release_${{ matrix.config.target }}.${{ env.LIB_EXT }}.gz
+            target/src_binding_simdutf_release_${{ matrix.config.target }}.rs
